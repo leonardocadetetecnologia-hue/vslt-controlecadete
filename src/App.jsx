@@ -1,32 +1,48 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 
-const APP_KEY = "vslt-divulgadoras-v5";
-const defaultState = { eventos: [], nextEventoId: 1, activeEventoId: null, logs: [] };
+const APP_KEY = "vslt-v7";
 
-/* ── SIMILARITY ─────────────────────────────────────────────── */
+const defaultState = {
+  eventos: [], nextEventoId: 1, activeEventoId: null,
+  auditLog: [], users: {
+    admin: { pass: "adminvslt", name: "Admin", color: "#8b5cf6", role: "Administrador" },
+    vitor: { pass: "vslt2024", name: "Vitor", color: "#10b981", role: "Operacional" },
+    lucas: { pass: "lucas123", name: "Lucas", color: "#f59e0b", role: "Produtor" },
+  },
+};
+
+/* ── HELPERS ───────────────────────────────────────────────── */
+const uid = () => Math.random().toString(36).slice(2, 10);
+const fmtCur = (v) => Number(v || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+const fmtDate = (ts) => new Date(ts).toLocaleString("pt-BR");
+const fmtShort = (ts) => new Date(ts).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+const CATS = ["Promoter", "Divulgadora", "Bday"];
+const VIEWS = { HOME: "home", EVENTO: "evento", CRIAR: "criar", SORTEIO: "sorteio", STATS: "stats", RELATORIOS: "relatorios", AUDITORIA: "auditoria", LOGS: "logs" };
+
+/* ── SIMILARITY ────────────────────────────────────────────── */
 function levenshtein(a, b) {
   const m = a.length, n = b.length;
-  const dp = Array.from({ length: m+1 }, () => Array(n+1).fill(0));
+  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
   for (let i = 0; i <= m; i++) dp[i][0] = i;
   for (let j = 0; j <= n; j++) dp[0][j] = j;
   for (let i = 1; i <= m; i++)
     for (let j = 1; j <= n; j++)
-      dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
   return dp[m][n];
 }
-function normStr(s){ return (s||"").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\s+/g," "); }
-function normInsta(s){ return (s||"").trim().toLowerCase().replace(/^@/,"").replace(/\s/g,""); }
-function similarity(a,b){ const na=normStr(a),nb=normStr(b); if(!na||!nb)return 0; if(na===nb)return 1; return 1-levenshtein(na,nb)/Math.max(na.length,nb.length); }
-function findDuplicates(newEntries, existing, threshold=0.78) {
+const normStr = (s) => (s || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
+const normInsta = (s) => (s || "").trim().toLowerCase().replace(/^@/, "").replace(/\s/g, "");
+const similarity = (a, b) => { const na = normStr(a), nb = normStr(b); if (!na || !nb) return 0; if (na === nb) return 1; return 1 - levenshtein(na, nb) / Math.max(na.length, nb.length); };
+function findDuplicates(newEntries, existing, threshold = 0.78) {
   const suspects = [];
   for (const entry of newEntries) {
     const ni = normInsta(entry.instagram);
     for (const ex of existing) {
       const ei = normInsta(ex.instagram);
-      if (ni&&ei&&ni===ei){ suspects.push({new:entry,existing:ex,reason:"Instagram idêntico",score:1}); break; }
+      if (ni && ei && ni === ei) { suspects.push({ new: entry, existing: ex, reason: "Instagram idêntico", score: 1 }); break; }
       const sim = similarity(entry.nome, ex.nome);
-      if (sim>=threshold&&sim<1){ suspects.push({new:entry,existing:ex,reason:`Nome similar (${(sim*100).toFixed(0)}%)`,score:sim}); }
-      else if (sim===1){ suspects.push({new:entry,existing:ex,reason:"Nome idêntico",score:1}); break; }
+      if (sim >= threshold && sim < 1) suspects.push({ new: entry, existing: ex, reason: `Nome similar (${(sim * 100).toFixed(0)}%)`, score: sim });
+      else if (sim === 1) { suspects.push({ new: entry, existing: ex, reason: "Nome idêntico", score: 1 }); break; }
     }
   }
   return suspects;
@@ -34,45 +50,51 @@ function findDuplicates(newEntries, existing, threshold=0.78) {
 
 /* ── PARSER ─────────────────────────────────────────────────── */
 function parseLista(text) {
-  const lines = text.split("\n").filter(l=>l.trim());
+  const lines = text.split("\n").filter(l => l.trim());
   const results = [];
   for (const line of lines) {
-    const cleaned = line.replace(/^\d+[\s\-.\)]*/,"").trim();
+    const cleaned = line.replace(/^\d+[\s\-.\)]*/, "").trim();
     if (!cleaned) continue;
-    let nome="", insta="";
+    let nome = "", insta = "";
     const instaMatch = cleaned.match(/@([a-zA-Z0-9_.]+)/);
     if (instaMatch) {
       insta = instaMatch[1].toLowerCase();
       const beforeAt = cleaned.substring(0, cleaned.indexOf(instaMatch[0]));
-      nome = beforeAt.replace(/[\/\\@\-\u2013\s]+$/,"").replace(/^\d+[\s\-.\)]*/,"").trim();
-      if (!nome) nome = cleaned.substring(cleaned.indexOf(instaMatch[0])+instaMatch[0].length).replace(/^[\/\\\-\u2013\s]+/,"").trim();
+      nome = beforeAt.replace(/[\/\\@\-\u2013\s]+$/, "").replace(/^\d+[\s\-.\)]*/, "").trim();
+      if (!nome) nome = cleaned.substring(cleaned.indexOf(instaMatch[0]) + instaMatch[0].length).replace(/^[\/\\\-\u2013\s]+/, "").trim();
     } else {
       const parts = cleaned.split(/\s*[\/\\]+\s*/);
-      if (parts.length>=2){ nome=parts[0].trim(); insta=parts[parts.length-1].trim().toLowerCase().replace(/^@/,""); }
-      else nome=cleaned;
+      if (parts.length >= 2) { nome = parts[0].trim(); insta = parts[parts.length - 1].trim().toLowerCase().replace(/^@/, ""); }
+      else nome = cleaned;
     }
-    nome = nome.replace(/\s+/g," ").trim();
-    if (nome||insta) results.push({ nome: nome||insta, instagram: insta });
+    nome = nome.replace(/\s+/g, " ").trim();
+    if (nome || insta) results.push({ nome: nome || insta, instagram: insta });
   }
   return results;
 }
 
-/* ── UTILS ──────────────────────────────────────────────────── */
-const uid = () => Math.random().toString(36).slice(2,10);
-const fmtDate = (iso) => iso ? new Date(iso).toLocaleString("pt-BR") : "";
-const fmtCur = (v) => Number(v||0).toLocaleString("pt-BR",{style:"currency",currency:"BRL"});
-const CATS = ["Divulgadora","Promoter","Bday"];
-const VIEWS = { HOME:"home", EVENTO:"evento", CRIAR_EVENTO:"criar_evento", SORTEIO:"sorteio", ESTATISTICAS:"estatisticas", LOGS:"logs", RELATORIOS:"relatorios" };
+/* ── STORAGE ─────────────────────────────────────────────────── */
+async function loadStorage() {
+  try {
+    const r = await window.storage.get(APP_KEY);
+    return r?.value ? JSON.parse(r.value) : null;
+  } catch { return null; }
+}
+async function saveStorage(data) {
+  try { await window.storage.set(APP_KEY, JSON.stringify(data)); } catch { }
+}
 
-/* ── MODAL COMPONENT ────────────────────────────────────────── */
-function Modal({ open, onClose, title, children, width=520 }) {
+/* ══════════════════════════════════════════════════════════════
+   MODAL COMPONENT
+══════════════════════════════════════════════════════════════ */
+function Modal({ open, onClose, title, children, width = 500 }) {
   if (!open) return null;
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" style={{ maxWidth:width }} onClick={e=>e.stopPropagation()}>
-        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18 }}>
-          <span style={{ fontSize:15,fontWeight:700,color:"#e0e0e0" }}>{title}</span>
-          <button onClick={onClose} style={{ background:"none",border:"none",color:"#555",cursor:"pointer",fontSize:20,lineHeight:1 }}>×</button>
+    <div style={mbs} onClick={onClose}>
+      <div style={{ ...mbox, maxWidth: width }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+          <span style={{ fontSize: 17, fontWeight: 700, color: "#fff" }}>{title}</span>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,.06)", border: "none", color: "#64748b", fontSize: 20, cursor: "pointer", width: 32, height: 32, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
         </div>
         {children}
       </div>
@@ -80,607 +102,677 @@ function Modal({ open, onClose, title, children, width=520 }) {
   );
 }
 
-/* ── MAIN APP ───────────────────────────────────────────────── */
+const mbs = { position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)" };
+const mbox = { background: "#0d0d18", border: "1px solid rgba(139,92,246,.2)", borderRadius: 22, padding: 28, width: "92%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 30px 80px rgba(0,0,0,.6)" };
+
+/* ── FIELD COMPONENT ─────────────────────────────────────────── */
+function Field({ label, children, style }) {
+  return (
+    <div style={{ marginBottom: 13, ...style }}>
+      {label && <label style={{ display: "block", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1.5, color: "#64748b", marginBottom: 7 }}>{label}</label>}
+      {children}
+    </div>
+  );
+}
+
+const inp = { width: "100%", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 10, padding: "11px 15px", color: "#e2e8f0", fontSize: 14, outline: "none", fontFamily: "inherit", transition: "all .2s" };
+
+/* ══════════════════════════════════════════════════════════════
+   MAIN APP
+══════════════════════════════════════════════════════════════ */
 export default function App() {
   const [data, setData] = useState(defaultState);
   const [loading, setLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState(null);
   const [view, setView] = useState(VIEWS.HOME);
   const [toast, setToast] = useState(null);
 
-  // Evento forms
-  const [novoEvtNome, setNovoEvtNome] = useState("");
-  const [novoEvtData, setNovoEvtData] = useState("");
-  const [novoEvtMetas, setNovoEvtMetas] = useState([{label:"",percentual:""}]);
+  // login
+  const [loginUser, setLoginUser] = useState("");
+  const [loginPass, setLoginPass] = useState("");
+  const [loginErr, setLoginErr] = useState(false);
 
-  // Ação forms
+  // evento form
+  const [novoNome, setNovoNome] = useState("");
+  const [novoData, setNovoData] = useState("");
+  const [novoMetas, setNovoMetas] = useState([{ label: "", percentual: "" }]);
+
+  // evento edit
+  const [editEvtModal, setEditEvtModal] = useState(false);
+  const [editEvtNome, setEditEvtNome] = useState("");
+  const [editEvtData, setEditEvtData] = useState("");
+
+  // ação
   const [acaoTexto, setAcaoTexto] = useState("");
-  const [acaoNumero, setAcaoNumero] = useState("");
+  const [acaoNum, setAcaoNum] = useState("");
   const [acaoNome, setAcaoNome] = useState("");
   const [dupReview, setDupReview] = useState(null);
   const [editingAcaoId, setEditingAcaoId] = useState(null);
   const [editAcaoTexto, setEditAcaoTexto] = useState("");
 
-  // Tabs
+  // tabs
   const [evtTab, setEvtTab] = useState("dashboard");
-  const [editingMetas, setEditingMetas] = useState(false);
-  const [tempMetas, setTempMetas] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Sorteio
-  const [sorteioEventoId, setSorteioEventoId] = useState("");
-  const [sorteioAcao, setSorteioAcao] = useState("");
-  const [sorteioQtd, setSorteioQtd] = useState(1);
-  const [sorteioResult, setSorteioResult] = useState(null);
-  const [sorteioAnimating, setSorteioAnimating] = useState(false);
-  const [sorteioAnimName, setSorteioAnimName] = useState("");
-  const [sorteioTitulo, setSorteioTitulo] = useState("");
-  const [sorteioObs, setSorteioObs] = useState("");
-  const [sортeioPremio, setSorteioPremio] = useState("");
-  const [diceFace, setDiceFace] = useState("⚄");
+  // metas
+  const [metasModal, setMetasModal] = useState(false);
+  const [tempMetas, setTempMetas] = useState([]);
 
-  // Modals
-  const [showEncerrar, setShowEncerrar] = useState(false);
-  const [showExport, setShowExport] = useState(false);
-  const [showEditEvt, setShowEditEvt] = useState(false);
-  const [editEvtNome, setEditEvtNome] = useState("");
-  const [editEvtData, setEditEvtData] = useState("");
+  // divulgadoras edit inline
+  const [editingDiv, setEditingDiv] = useState(null);
+  const [editDivNome, setEditDivNome] = useState("");
+  const [editDivIg, setEditDivIg] = useState("");
 
-  // Promoters
-  const [promoterModal, setPromoterModal] = useState(false);
-  const [editingPromoter, setEditingPromoter] = useState(null);
+  // promoters
+  const [promModal, setPromModal] = useState(false);
+  const [editingProm, setEditingProm] = useState(null);
   const [pNome, setPNome] = useState("");
   const [pEmail, setPEmail] = useState("");
   const [pLink, setPLink] = useState("");
-  const [pCategoria, setPCategoria] = useState("Promoter");
-  const [vendaModal, setVendaModal] = useState(null); // promoterId
+  const [pCat, setPCat] = useState("Promoter");
+
+  // venda
+  const [vendaModal, setVendaModal] = useState(false);
+  const [vendaPromId, setVendaPromId] = useState(null);
+  const [editingVendaId, setEditingVendaId] = useState(null);
   const [vQtd, setVQtd] = useState(1);
   const [vValor, setVValor] = useState("");
-  const [vComprovante, setVComprovante] = useState("");
+  const [vComp, setVComp] = useState("");
   const [vObs, setVObs] = useState("");
-  const [editingVenda, setEditingVenda] = useState(null);
-  const [condicoesModal, setCondicoesModal] = useState(false);
-  const [condicoesCat, setCondicoesCat] = useState("Divulgadora");
-  const [condicoesTexto, setCondicoesTexto] = useState("");
-  const [verPromoterModal, setVerPromoterModal] = useState(null);
-  const [editPromoterVendaModal, setEditPromoterVendaModal] = useState(null);
+
+  // condições
+  const [condModal, setCondModal] = useState(false);
+  const [condCat, setCondCat] = useState("Divulgadora");
+  const [condTexto, setCondTexto] = useState("");
+
+  // sorteio
+  const [sortEventoId, setSortEventoId] = useState("");
+  const [sortAcao, setSortAcao] = useState("");
+  const [sortQtd, setSortQtd] = useState(1);
+  const [sortResult, setSortResult] = useState(null);
+  const [sortAnimating, setSortAnimating] = useState(false);
+  const [sortAnimName, setSortAnimName] = useState("");
+  const [sortTitulo, setSortTitulo] = useState("");
+  const [sortPremio, setSortPremio] = useState("");
+  const [sortObs, setSortObs] = useState("");
+  const [diceFace, setDiceFace] = useState("⚄");
+
+  // auditoria filter
+  const [auditFilter, setAuditFilter] = useState("all");
+
+  // modais encerrar / exportar
+  const [showEncerrar, setShowEncerrar] = useState(false);
+  const [showExport, setShowExport] = useState(false);
 
   useEffect(() => {
     (async () => {
-      try {
-        const r = await window.storage.get(APP_KEY);
-        if (r?.value) setData({ ...defaultState, ...JSON.parse(r.value) });
-      } catch(e) {}
+      const saved = await loadStorage();
+      if (saved) setData({ ...defaultState, ...saved });
       setLoading(false);
     })();
   }, []);
 
-  const save = useCallback(async (d) => {
-    setData(d); try { await window.storage.set(APP_KEY,JSON.stringify(d)); } catch(e) {}
-  }, []);
+  const save = useCallback(async (d) => { setData(d); await saveStorage(d); }, []);
 
-  const addLog = useCallback((d, msg, tipo="info") => {
-    const logs = [{ id:uid(), msg, tipo, ts:new Date().toISOString() }, ...(d.logs||[])].slice(0,200);
+  const addLog = useCallback((d, msg, tipo = "info") => {
+    const logs = [{ id: uid(), msg, tipo, ts: new Date().toISOString() }, ...(d.logs || [])].slice(0, 200);
     return { ...d, logs };
   }, []);
 
-  const show = useCallback((msg,type="success") => {
-    setToast({msg,type}); setTimeout(()=>setToast(null),3200);
-  },[]);
+  const addAudit = useCallback((d, type, action, page, detail = "") => {
+    const entry = { id: uid(), type, user: currentUser || "admin", action, page, detail, ts: Date.now() };
+    const auditLog = [entry, ...(d.auditLog || [])].slice(0, 500);
+    return { ...d, auditLog };
+  }, [currentUser]);
+
+  const showToast = useCallback((msg, type = "ok") => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
 
   const activeEvento = useMemo(() => {
     if (!data.activeEventoId) return null;
-    return data.eventos.find(e=>e.id===data.activeEventoId)||null;
+    return data.eventos.find(e => e.id === data.activeEventoId) || null;
   }, [data]);
 
-  const updateEvento = useCallback((updatedEvt, logMsg) => {
-    let nd = { ...data, eventos: data.eventos.map(e=>e.id===updatedEvt.id?updatedEvt:e) };
-    if (logMsg) nd = addLog(nd, logMsg);
+  const updateEvento = useCallback((evt, auditAction = null, auditPage = null, auditDetail = "") => {
+    let nd = { ...data, eventos: data.eventos.map(e => e.id === evt.id ? evt : e) };
+    if (auditAction) nd = addAudit(nd, "edit", auditAction, auditPage || "Eventos", auditDetail);
     save(nd);
-  }, [data, save, addLog]);
+  }, [data, save, addAudit]);
 
   /* ── CALC STATS ──────────────────────────────────────────── */
   const calcStats = useCallback((evt) => {
     if (!evt) return null;
-    const { divulgadoras:divs, acoes, marcacoes } = evt;
-    if (!divs.length||!acoes.length) return { ranking:[], avg:0, topCount:0, acaoStats:[] };
+    const { divulgadoras: divs, acoes, marcacoes } = evt;
+    if (!divs.length || !acoes.length) return { ranking: [], avg: 0, topCount: 0, acaoStats: [] };
     const totalAcoes = acoes.length;
     const ranking = divs.map(d => {
-      let ok=0;
-      for (const a of acoes) { if (marcacoes[`${d.id}_${a.id}`]==="OK") ok++; }
-      return { ...d, ok, total:totalAcoes, pct:(ok/totalAcoes)*100 };
-    }).sort((a,b)=>b.pct-a.pct||b.ok-a.ok);
-    const avg = ranking.length ? ranking.reduce((s,r)=>s+r.pct,0)/ranking.length : 0;
-    const topCount = ranking.filter(r=>r.pct===100).length;
+      let ok = 0;
+      for (const a of acoes) if (marcacoes[`${d.id}_${a.id}`] === "OK") ok++;
+      return { ...d, ok, total: totalAcoes, pct: (ok / totalAcoes) * 100 };
+    }).sort((a, b) => b.pct - a.pct || b.ok - a.ok);
+    const avg = ranking.length ? ranking.reduce((s, r) => s + r.pct, 0) / ranking.length : 0;
+    const topCount = ranking.filter(r => r.pct === 100).length;
     const acaoStats = acoes.map(a => {
-      let ok=0,t=0;
-      for (const d of divs) { const k=`${d.id}_${a.id}`; if(marcacoes[k]){t++; if(marcacoes[k]==="OK")ok++;} }
-      return { ...a, ok, total:t };
+      let ok = 0, t = 0;
+      for (const d of divs) { const k = `${d.id}_${a.id}`; if (marcacoes[k]) { t++; if (marcacoes[k] === "OK") ok++; } }
+      return { ...a, ok, total: t };
     });
     return { ranking, avg, topCount, acaoStats };
   }, []);
 
-  const stats = useMemo(()=>calcStats(activeEvento),[activeEvento,calcStats]);
+  const stats = useMemo(() => calcStats(activeEvento), [activeEvento, calcStats]);
+
+  /* ── AUTH ─────────────────────────────────────────────────── */
+  const doLogin = useCallback(() => {
+    const u = loginUser.trim().toLowerCase();
+    const users = data.users || defaultState.users;
+    if (users[u] && users[u].pass === loginPass) {
+      setCurrentUser(u);
+      let nd = addAudit(data, "system", `Login realizado`, "Sistema", `Usuário: ${users[u].name}`);
+      save(nd);
+      setLoginErr(false);
+    } else {
+      setLoginErr(true);
+      setTimeout(() => setLoginErr(false), 3000);
+    }
+  }, [loginUser, loginPass, data, addAudit, save]);
+
+  const doLogout = useCallback(() => {
+    let nd = addAudit(data, "system", "Logout realizado", "Sistema", "");
+    save(nd);
+    setCurrentUser(null);
+  }, [data, addAudit, save]);
 
   /* ── EVENTO CRUD ─────────────────────────────────────────── */
   const criarEvento = useCallback(() => {
-    if (!novoEvtNome.trim()){ show("Informe o nome do evento","error"); return; }
-    const metas = novoEvtMetas.filter(m=>m.label.trim()&&m.percentual).map(m=>({label:m.label.trim(),percentual:parseFloat(m.percentual)}));
+    if (!novoNome.trim()) { showToast("Informe o nome", "del"); return; }
+    const metas = novoMetas.filter(m => m.label.trim() && m.percentual).map(m => ({ label: m.label.trim(), percentual: parseFloat(m.percentual) }));
     const evt = {
-      id:`evt_${data.nextEventoId}`, nome:novoEvtNome.trim(), dataEvento:novoEvtData, metas,
-      divulgadoras:[], acoes:[], marcacoes:{}, sorteios:[], promoters:[], condicoes:{},
-      nextDivId:1, nextAcaoId:1, nextSorteioId:1, nextPromoterId:1,
-      criadoEm:new Date().toISOString(), encerrado:false,
+      id: `evt_${data.nextEventoId}`, nome: novoNome.trim(), dataEvento: novoData, metas,
+      divulgadoras: [], acoes: [], marcacoes: {}, sorteios: [], promoters: [], condicoes: {},
+      nextDivId: 1, nextAcaoId: 1, nextSorteioId: 1, nextPromoterId: 1,
+      criadoEm: new Date().toISOString(), encerrado: false,
     };
-    let nd = { ...data, eventos:[...data.eventos,evt], nextEventoId:data.nextEventoId+1, activeEventoId:evt.id };
-    nd = addLog(nd, `Evento "${evt.nome}" criado`);
+    let nd = { ...data, eventos: [...data.eventos, evt], nextEventoId: data.nextEventoId + 1, activeEventoId: evt.id };
+    nd = addAudit(nd, "create", `Evento "${evt.nome}" criado`, "Eventos", `Data: ${novoData || "—"}`);
     save(nd);
-    setNovoEvtNome(""); setNovoEvtData(""); setNovoEvtMetas([{label:"",percentual:""}]);
+    setNovoNome(""); setNovoData(""); setNovoMetas([{ label: "", percentual: "" }]);
     setView(VIEWS.EVENTO); setEvtTab("dashboard");
-    show(`Evento "${evt.nome}" criado!`);
-  }, [novoEvtNome, novoEvtData, novoEvtMetas, data, save, addLog, show]);
+    showToast(`✅ Evento "${evt.nome}" criado!`);
+  }, [novoNome, novoData, novoMetas, data, addAudit, save, showToast]);
 
   const abrirEvento = useCallback((id) => {
-    save({...data,activeEventoId:id});
+    save({ ...data, activeEventoId: id });
     setView(VIEWS.EVENTO); setEvtTab("dashboard");
   }, [data, save]);
 
   const deletarEvento = useCallback((id) => {
-    const evt = data.eventos.find(e=>e.id===id);
-    let nd = {...data, eventos:data.eventos.filter(e=>e.id!==id), activeEventoId:data.activeEventoId===id?null:data.activeEventoId};
-    nd = addLog(nd, `Evento "${evt?.nome}" removido`, "danger");
+    const evt = data.eventos.find(e => e.id === id);
+    let nd = { ...data, eventos: data.eventos.filter(e => e.id !== id), activeEventoId: data.activeEventoId === id ? null : data.activeEventoId };
+    nd = addAudit(nd, "delete", `Evento "${evt?.nome}" removido`, "Eventos", "");
     save(nd);
-    if (data.activeEventoId===id) setView(VIEWS.HOME);
-    show("Evento removido");
-  }, [data, save, addLog, show]);
+    if (data.activeEventoId === id) setView(VIEWS.HOME);
+    showToast("🗑 Evento removido", "del");
+  }, [data, addAudit, save, showToast]);
 
-  /* ── AÇÃO CRUD ───────────────────────────────────────────── */
+  const salvarEditEvt = useCallback(() => {
+    if (!activeEvento) return;
+    const oldNome = activeEvento.nome;
+    updateEvento({ ...activeEvento, nome: editEvtNome.trim(), dataEvento: editEvtData },
+      `Evento renomeado`, "Eventos", `${oldNome} → ${editEvtNome}`);
+    setEditEvtModal(false);
+    showToast("✅ Evento atualizado", "edit");
+  }, [activeEvento, editEvtNome, editEvtData, updateEvento, showToast]);
+
+  /* ── AÇÃO ────────────────────────────────────────────────── */
   const processarAcao = useCallback(() => {
     if (!activeEvento) return;
-    if (!acaoTexto.trim()){ show("Cole a lista de participantes","error"); return; }
-    const num = parseInt(acaoNumero)||(activeEvento.acoes.length+1);
-    if (activeEvento.acoes.find(a=>a.numero===num)){ show(`Ação ${num} já existe!`,"error"); return; }
+    if (!acaoTexto.trim()) { showToast("Cole a lista", "del"); return; }
+    const num = parseInt(acaoNum) || (activeEvento.acoes.length + 1);
+    if (activeEvento.acoes.find(a => a.numero === num)) { showToast(`Ação ${num} já existe!`, "del"); return; }
     const parsed = parseLista(acaoTexto);
-    if (!parsed.length){ show("Nenhum nome encontrado","error"); return; }
-    const suspects = findDuplicates(parsed, activeEvento.divulgadoras).filter(s=>s.score<1);
-    if (suspects.length>0) {
-      setDupReview({parsed,num,nome:acaoNome||`Ação ${num}`,suspects,decisions:suspects.map(()=>"merge")});
+    if (!parsed.length) { showToast("Nenhum nome encontrado", "del"); return; }
+    const suspects = findDuplicates(parsed, activeEvento.divulgadoras).filter(s => s.score < 1);
+    if (suspects.length > 0) {
+      setDupReview({ parsed, num, nome: acaoNome || `Ação ${num}`, suspects, decisions: suspects.map(() => "merge") });
     } else {
-      confirmarAcaoFinal(parsed,num,acaoNome||`Ação ${num}`,[]);
+      confirmarAcao(parsed, num, acaoNome || `Ação ${num}`, []);
     }
-  }, [activeEvento, acaoTexto, acaoNumero, acaoNome, show]);
+  }, [activeEvento, acaoTexto, acaoNum, acaoNome, showToast]);
 
-  const confirmarAcaoFinal = useCallback((parsed,num,nome,mergeDecisions) => {
+  const confirmarAcao = useCallback((parsed, num, nome, mergeDecisions) => {
     if (!activeEvento) return;
     const evt = JSON.parse(JSON.stringify(activeEvento));
     const acaoId = `acao_${evt.nextAcaoId}`; evt.nextAcaoId++;
-    evt.acoes.push({id:acaoId,nome,numero:num,totalParticipantes:parsed.length});
-    evt.acoes.sort((a,b)=>a.numero-b.numero);
+    evt.acoes.push({ id: acaoId, nome, numero: num, totalParticipantes: parsed.length });
+    evt.acoes.sort((a, b) => a.numero - b.numero);
     const mergeMap = {};
-    for (const md of (mergeDecisions||[])) if(md.action==="merge") mergeMap[normStr(md.newEntry.nome)]=md.existingId;
+    for (const md of (mergeDecisions || [])) if (md.action === "merge") mergeMap[normStr(md.newEntry.nome)] = md.existingId;
     const participantIds = new Set();
     for (const p of parsed) {
-      const pNorm = normStr(p.nome); let div=null;
-      if (mergeMap[pNorm]) div=evt.divulgadoras.find(d=>d.id===mergeMap[pNorm]);
-      if (!div){ const ni=normInsta(p.instagram); if(ni) div=evt.divulgadoras.find(d=>normInsta(d.instagram)===ni); }
-      if (!div) div=evt.divulgadoras.find(d=>normStr(d.nome)===pNorm);
+      const pNorm = normStr(p.nome); let div = null;
+      if (mergeMap[pNorm]) div = evt.divulgadoras.find(d => d.id === mergeMap[pNorm]);
+      if (!div) { const ni = normInsta(p.instagram); if (ni) div = evt.divulgadoras.find(d => normInsta(d.instagram) === ni); }
+      if (!div) div = evt.divulgadoras.find(d => normStr(d.nome) === pNorm);
       if (!div) {
-        const newId=`div_${evt.nextDivId}`; evt.nextDivId++;
-        div={id:newId,nome:p.nome,instagram:p.instagram||"",entradaAcao:num};
+        const newId = `div_${evt.nextDivId}`; evt.nextDivId++;
+        div = { id: newId, nome: p.nome, instagram: p.instagram || "", entradaAcao: num };
         evt.divulgadoras.push(div);
-        for (const a of evt.acoes) if(a.id!==acaoId) evt.marcacoes[`${div.id}_${a.id}`]="X";
+        for (const a of evt.acoes) if (a.id !== acaoId) evt.marcacoes[`${div.id}_${a.id}`] = "X";
       }
       participantIds.add(div.id);
-      evt.marcacoes[`${div.id}_${acaoId}`]="OK";
+      evt.marcacoes[`${div.id}_${acaoId}`] = "OK";
     }
-    for (const d of evt.divulgadoras) if(!participantIds.has(d.id)) evt.marcacoes[`${d.id}_${acaoId}`]="X";
-    const novas = parsed.filter(p=>{ const ni=normInsta(p.instagram),nn=normStr(p.nome); return !activeEvento.divulgadoras.some(d=>(ni&&normInsta(d.instagram)===ni)||normStr(d.nome)===nn); });
-    updateEvento(evt, `Ação ${num} importada (${parsed.length} participantes, ${novas.length} novas)`);
-    setAcaoTexto(""); setAcaoNumero(""); setAcaoNome(""); setDupReview(null);
-    show(`Ação ${num} registrada! ${parsed.length} participantes, ${novas.length} novas`);
-  }, [activeEvento, updateEvento, show]);
+    for (const d of evt.divulgadoras) if (!participantIds.has(d.id)) evt.marcacoes[`${d.id}_${acaoId}`] = "X";
+    const novas = parsed.filter(p => { const ni = normInsta(p.instagram), nn = normStr(p.nome); return !activeEvento.divulgadoras.some(d => (ni && normInsta(d.instagram) === ni) || normStr(d.nome) === nn); });
+    updateEvento(evt, `Ação ${num} importada`, "Importar Ação", `${parsed.length} participantes, ${novas.length} novas`);
+    setAcaoTexto(""); setAcaoNum(""); setAcaoNome(""); setDupReview(null);
+    showToast(`✅ Ação ${num} registrada! ${novas.length} novas`);
+  }, [activeEvento, updateEvento, showToast]);
 
   const removerAcao = useCallback((acaoId) => {
     if (!activeEvento) return;
     const evt = JSON.parse(JSON.stringify(activeEvento));
-    const acao = evt.acoes.find(a=>a.id===acaoId);
-    evt.acoes = evt.acoes.filter(a=>a.id!==acaoId);
-    Object.keys(evt.marcacoes).filter(k=>k.endsWith("_"+acaoId)).forEach(k=>delete evt.marcacoes[k]);
-    updateEvento(evt, `Ação ${acao?.numero} removida`); show("Ação removida");
-  }, [activeEvento, updateEvento, show]);
+    const a = evt.acoes.find(x => x.id === acaoId);
+    evt.acoes = evt.acoes.filter(x => x.id !== acaoId);
+    Object.keys(evt.marcacoes).filter(k => k.endsWith("_" + acaoId)).forEach(k => delete evt.marcacoes[k]);
+    updateEvento(evt, `Ação ${a?.numero} removida`, "Ações", ""); showToast("🗑 Ação removida", "del");
+  }, [activeEvento, updateEvento, showToast]);
 
   const removerDiv = useCallback((divId) => {
     if (!activeEvento) return;
     const evt = JSON.parse(JSON.stringify(activeEvento));
-    const div = evt.divulgadoras.find(d=>d.id===divId);
-    evt.divulgadoras = evt.divulgadoras.filter(d=>d.id!==divId);
-    Object.keys(evt.marcacoes).filter(k=>k.startsWith(divId+"_")).forEach(k=>delete evt.marcacoes[k]);
-    updateEvento(evt, `Divulgadora "${div?.nome}" removida`); show("Divulgadora removida");
-  }, [activeEvento, updateEvento, show]);
+    const d = evt.divulgadoras.find(x => x.id === divId);
+    evt.divulgadoras = evt.divulgadoras.filter(x => x.id !== divId);
+    Object.keys(evt.marcacoes).filter(k => k.startsWith(divId + "_")).forEach(k => delete evt.marcacoes[k]);
+    updateEvento(evt, `Divulgadora "${d?.nome}" removida`, "Divulgadoras", ""); showToast("🗑 Divulgadora removida", "del");
+  }, [activeEvento, updateEvento, showToast]);
+
+  const salvarEditDiv = useCallback((divId) => {
+    if (!activeEvento) return;
+    const evt = JSON.parse(JSON.stringify(activeEvento));
+    const idx = evt.divulgadoras.findIndex(d => d.id === divId);
+    if (idx < 0) return;
+    const old = { ...evt.divulgadoras[idx] };
+    evt.divulgadoras[idx].nome = editDivNome;
+    evt.divulgadoras[idx].instagram = editDivIg;
+    const changes = [];
+    if (old.nome !== editDivNome) changes.push(`Nome: ${old.nome} → ${editDivNome}`);
+    if (old.instagram !== editDivIg) changes.push(`Instagram: ${old.instagram} → ${editDivIg}`);
+    updateEvento(evt, `Divulgadora "${editDivNome}" editada`, "Divulgadoras", changes.join(" · ") || "Dados atualizados");
+    setEditingDiv(null);
+    showToast("✅ Divulgadora atualizada", "edit");
+  }, [activeEvento, editDivNome, editDivIg, updateEvento, showToast]);
+
+  const encerrarEvento = useCallback(() => {
+    if (!activeEvento) return;
+    updateEvento({ ...activeEvento, encerrado: true, encerradoEm: new Date().toISOString() }, `Evento "${activeEvento.nome}" encerrado`, "Eventos", `${activeEvento.acoes.length} ações finais`);
+    setShowEncerrar(false); showToast("🔒 Evento encerrado!");
+  }, [activeEvento, updateEvento, showToast]);
+
+  const reabrirEvento = useCallback(() => {
+    if (!activeEvento) return;
+    updateEvento({ ...activeEvento, encerrado: false, encerradoEm: null }, `Evento "${activeEvento.nome}" reaberto`, "Eventos", "");
+    showToast("🔓 Evento reaberto!");
+  }, [activeEvento, updateEvento, showToast]);
 
   const limparAcao = useCallback((acaoId) => {
     if (!activeEvento) return;
     const evt = JSON.parse(JSON.stringify(activeEvento));
-    Object.keys(evt.marcacoes).filter(k=>k.endsWith("_"+acaoId)).forEach(k=>delete evt.marcacoes[k]);
-    updateEvento(evt);
-    setEditingAcaoId(acaoId); setEditAcaoTexto("");
-    show("Marcações limpas. Submeta a nova lista.");
-  }, [activeEvento, updateEvento, show]);
+    Object.keys(evt.marcacoes).filter(k => k.endsWith("_" + acaoId)).forEach(k => delete evt.marcacoes[k]);
+    updateEvento(evt); setEditingAcaoId(acaoId); setEditAcaoTexto("");
+    showToast("Marcações limpas. Submeta a nova lista.");
+  }, [activeEvento, updateEvento, showToast]);
 
   const resubmitAcao = useCallback(() => {
-    if (!activeEvento||!editingAcaoId) return;
-    if (!editAcaoTexto.trim()){ show("Cole a nova lista","error"); return; }
-    const acao = activeEvento.acoes.find(a=>a.id===editingAcaoId); if(!acao) return;
-    const parsed = parseLista(editAcaoTexto);
-    if (!parsed.length){ show("Nenhum nome encontrado","error"); return; }
+    if (!activeEvento || !editingAcaoId) return;
+    if (!editAcaoTexto.trim()) { showToast("Cole a nova lista", "del"); return; }
+    const acao = activeEvento.acoes.find(a => a.id === editingAcaoId); if (!acao) return;
+    const parsed = parseLista(editAcaoTexto); if (!parsed.length) { showToast("Nenhum nome", "del"); return; }
     const evt = JSON.parse(JSON.stringify(activeEvento));
     const acaoId = editingAcaoId;
-    Object.keys(evt.marcacoes).filter(k=>k.endsWith("_"+acaoId)).forEach(k=>delete evt.marcacoes[k]);
+    Object.keys(evt.marcacoes).filter(k => k.endsWith("_" + acaoId)).forEach(k => delete evt.marcacoes[k]);
     const participantIds = new Set();
     for (const p of parsed) {
-      const pNorm=normStr(p.nome), ni=normInsta(p.instagram); let div=null;
-      if(ni) div=evt.divulgadoras.find(d=>normInsta(d.instagram)===ni);
-      if(!div) div=evt.divulgadoras.find(d=>normStr(d.nome)===pNorm);
-      if(!div){
-        const newId=`div_${evt.nextDivId}`; evt.nextDivId++;
-        div={id:newId,nome:p.nome,instagram:p.instagram||"",entradaAcao:acao.numero};
-        evt.divulgadoras.push(div);
-        for(const a of evt.acoes) if(a.id!==acaoId&&!evt.marcacoes[`${div.id}_${a.id}`]) evt.marcacoes[`${div.id}_${a.id}`]="X";
-      }
+      const pNorm = normStr(p.nome), ni = normInsta(p.instagram); let div = null;
+      if (ni) div = evt.divulgadoras.find(d => normInsta(d.instagram) === ni);
+      if (!div) div = evt.divulgadoras.find(d => normStr(d.nome) === pNorm);
+      if (!div) { const newId = `div_${evt.nextDivId}`; evt.nextDivId++; div = { id: newId, nome: p.nome, instagram: p.instagram || "", entradaAcao: acao.numero }; evt.divulgadoras.push(div); for (const a of evt.acoes) if (a.id !== acaoId && !evt.marcacoes[`${div.id}_${a.id}`]) evt.marcacoes[`${div.id}_${a.id}`] = "X"; }
       participantIds.add(div.id);
-      evt.marcacoes[`${div.id}_${acaoId}`]="OK";
+      evt.marcacoes[`${div.id}_${acaoId}`] = "OK";
     }
-    for(const d of evt.divulgadoras) if(!participantIds.has(d.id)) evt.marcacoes[`${d.id}_${acaoId}`]="X";
-    const idx = evt.acoes.findIndex(a=>a.id===acaoId);
-    if(idx>=0) evt.acoes[idx].totalParticipantes=parsed.length;
-    updateEvento(evt, `Ação ${acao.numero} reprocessada`);
-    setEditingAcaoId(null); setEditAcaoTexto("");
-    show(`Ação ${acao.numero} reprocessada!`);
-  }, [activeEvento, editingAcaoId, editAcaoTexto, updateEvento, show]);
+    for (const d of evt.divulgadoras) if (!participantIds.has(d.id)) evt.marcacoes[`${d.id}_${acaoId}`] = "X";
+    const idx = evt.acoes.findIndex(a => a.id === acaoId);
+    if (idx >= 0) evt.acoes[idx].totalParticipantes = parsed.length;
+    updateEvento(evt, `Ação ${acao.numero} reprocessada`, "Ações", `${parsed.length} participantes`);
+    setEditingAcaoId(null); setEditAcaoTexto(""); showToast(`✅ Ação ${acao.numero} reprocessada!`);
+  }, [activeEvento, editingAcaoId, editAcaoTexto, updateEvento, showToast]);
 
-  const encerrarEvento = useCallback(() => {
-    if(!activeEvento) return;
-    updateEvento({...activeEvento,encerrado:true,encerradoEm:new Date().toISOString()}, `Evento "${activeEvento.nome}" encerrado`);
-    setShowEncerrar(false); show("Evento encerrado!");
-  }, [activeEvento, updateEvento, show]);
+  /* ── METAS ───────────────────────────────────────────────── */
+  const salvarMetas = useCallback(() => {
+    if (!activeEvento) return;
+    const metas = tempMetas.filter(m => m.label.trim() && m.percentual).map(m => ({ label: m.label.trim(), percentual: parseFloat(m.percentual) }));
+    updateEvento({ ...activeEvento, metas }, "Metas atualizadas", "Metas", metas.map(m => `${m.label} ≥${m.percentual}%`).join(" · "));
+    setMetasModal(false); showToast("✅ Metas salvas", "edit");
+  }, [activeEvento, tempMetas, updateEvento, showToast]);
 
-  const reabrirEvento = useCallback(() => {
-    if(!activeEvento) return;
-    updateEvento({...activeEvento,encerrado:false,encerradoEm:null}, `Evento "${activeEvento.nome}" reaberto`);
-    show("Evento reaberto!");
-  }, [activeEvento, updateEvento, show]);
-
-  /* ── PROMOTERS CRUD ─────────────────────────────────────── */
+  /* ── PROMOTERS ───────────────────────────────────────────── */
   const salvarPromoter = useCallback(() => {
     if (!activeEvento) return;
-    if (!pNome.trim()||!pEmail.trim()||!pLink.trim()){ show("Nome, email e link são obrigatórios","error"); return; }
+    if (!pNome.trim() || !pEmail.trim() || !pLink.trim()) { showToast("Nome, email e link obrigatórios", "del"); return; }
     const evt = JSON.parse(JSON.stringify(activeEvento));
     if (!evt.promoters) evt.promoters = [];
     if (!evt.nextPromoterId) evt.nextPromoterId = 1;
-    if (editingPromoter) {
-      const idx = evt.promoters.findIndex(p=>p.id===editingPromoter);
-      if (idx>=0) evt.promoters[idx] = {...evt.promoters[idx], nome:pNome.trim(), email:pEmail.trim(), link:pLink.trim(), categoria:pCategoria};
-      updateEvento(evt, `Promoter "${pNome}" editado`);
+    if (editingProm) {
+      const idx = evt.promoters.findIndex(p => p.id === editingProm);
+      if (idx >= 0) {
+        const old = { ...evt.promoters[idx] };
+        const changes = [];
+        if (old.nome !== pNome) changes.push(`Nome: ${old.nome} → ${pNome}`);
+        if (old.email !== pEmail) changes.push(`Email alterado`);
+        if (old.categoria !== pCat) changes.push(`Categoria: ${old.categoria} → ${pCat}`);
+        evt.promoters[idx] = { ...evt.promoters[idx], nome: pNome.trim(), email: pEmail.trim(), link: pLink.trim(), categoria: pCat };
+        updateEvento(evt, `Promoter "${pNome}" editado`, "Promoters", changes.join(" · ") || "Dados atualizados");
+      }
     } else {
-      const np = {id:`prom_${evt.nextPromoterId}`,nome:pNome.trim(),email:pEmail.trim(),link:pLink.trim(),categoria:pCategoria,vendas:[],criadoEm:new Date().toISOString()};
+      evt.promoters.push({ id: `prom_${evt.nextPromoterId}`, nome: pNome.trim(), email: pEmail.trim(), link: pLink.trim(), categoria: pCat, vendas: [], criadoEm: new Date().toISOString() });
       evt.nextPromoterId++;
-      evt.promoters.push(np);
-      updateEvento(evt, `Promoter "${pNome}" cadastrado`);
+      updateEvento(evt, `Promoter "${pNome}" cadastrado`, "Promoters", `Categoria: ${pCat}`);
     }
-    setPromoterModal(false); setEditingPromoter(null); setPNome(""); setPEmail(""); setPLink(""); setPCategoria("Promoter");
-    show(editingPromoter ? "Promoter atualizado!" : "Promoter cadastrado!");
-  }, [activeEvento, pNome, pEmail, pLink, pCategoria, editingPromoter, updateEvento, show]);
-
-  const editarPromoter = useCallback((p) => {
-    setEditingPromoter(p.id); setPNome(p.nome); setPEmail(p.email); setPLink(p.link); setPCategoria(p.categoria||"Promoter");
-    setPromoterModal(true);
-  }, []);
+    setPromModal(false); setEditingProm(null); setPNome(""); setPEmail(""); setPLink(""); setPCat("Promoter");
+    showToast(editingProm ? "✅ Promoter atualizado" : "✅ Promoter cadastrado", "edit");
+  }, [activeEvento, pNome, pEmail, pLink, pCat, editingProm, updateEvento, showToast]);
 
   const removerPromoter = useCallback((promId) => {
     if (!activeEvento) return;
     const evt = JSON.parse(JSON.stringify(activeEvento));
-    const p = evt.promoters.find(x=>x.id===promId);
-    evt.promoters = evt.promoters.filter(x=>x.id!==promId);
-    updateEvento(evt, `Promoter "${p?.nome}" removido`); show("Promoter removido");
-  }, [activeEvento, updateEvento, show]);
+    const p = evt.promoters.find(x => x.id === promId);
+    evt.promoters = evt.promoters.filter(x => x.id !== promId);
+    updateEvento(evt, `Promoter "${p?.nome}" removido`, "Promoters", ""); showToast("🗑 Promoter removido", "del");
+  }, [activeEvento, updateEvento, showToast]);
 
   const salvarVenda = useCallback(() => {
-    if (!activeEvento||!vendaModal) return;
-    if (!vQtd||!vValor){ show("Qtd e valor são obrigatórios","error"); return; }
+    if (!activeEvento || !vendaPromId) return;
+    if (!vQtd || !vValor) { showToast("Qtd e valor obrigatórios", "del"); return; }
     const evt = JSON.parse(JSON.stringify(activeEvento));
-    const idx = evt.promoters.findIndex(p=>p.id===vendaModal);
-    if (idx<0) return;
-    if (!evt.promoters[idx].vendas) evt.promoters[idx].vendas=[];
-    if (editingVenda) {
-      const vi = evt.promoters[idx].vendas.findIndex(v=>v.id===editingVenda);
-      if(vi>=0) evt.promoters[idx].vendas[vi]={...evt.promoters[idx].vendas[vi],qtd:parseInt(vQtd),valor:parseFloat(vValor),comprovante:vComprovante,obs:vObs,editadoEm:new Date().toISOString()};
-      updateEvento(evt, `Venda editada — ${evt.promoters[idx].nome}`);
+    const idx = evt.promoters.findIndex(p => p.id === vendaPromId); if (idx < 0) return;
+    const p = evt.promoters[idx];
+    if (editingVendaId) {
+      const vi = p.vendas.findIndex(v => v.id === editingVendaId);
+      if (vi >= 0) {
+        const old = { ...p.vendas[vi] };
+        p.vendas[vi] = { ...p.vendas[vi], qtd: parseInt(vQtd), valor: parseFloat(vValor), comprovante: vComp, obs: vObs };
+        updateEvento(evt, `Venda editada — ${p.nome}`, "Promoters", `Qtd: ${old.qtd} → ${vQtd} · R$${old.valor} → R$${vValor}`);
+        showToast("✅ Venda atualizada", "edit");
+      }
     } else {
-      evt.promoters[idx].vendas.push({id:uid(),qtd:parseInt(vQtd),valor:parseFloat(vValor),comprovante:vComprovante,obs:vObs,data:new Date().toISOString()});
-      updateEvento(evt, `Venda registrada — ${evt.promoters[idx].nome} (${vQtd} ingresso(s) — ${fmtCur(vValor)})`);
+      p.vendas.push({ id: uid(), qtd: parseInt(vQtd), valor: parseFloat(vValor), comprovante: vComp, obs: vObs, data: new Date().toISOString() });
+      updateEvento(evt, `Venda registrada — ${p.nome}`, "Promoters", `${vQtd} ingresso(s) · ${fmtCur(parseInt(vQtd) * parseFloat(vValor))}`);
+      showToast("✅ Venda registrada");
     }
-    setVendaModal(null); setVQtd(1); setVValor(""); setVComprovante(""); setVObs(""); setEditingVenda(null);
-    show("Venda salva!");
-  }, [activeEvento, vendaModal, vQtd, vValor, vComprovante, vObs, editingVenda, updateEvento, show]);
-
-  const editarVenda = useCallback((promId, venda) => {
-    setVendaModal(promId); setEditingVenda(venda.id);
-    setVQtd(venda.qtd); setVValor(venda.valor); setVComprovante(venda.comprovante||""); setVObs(venda.obs||"");
-  }, []);
+    setVendaModal(false); setEditingVendaId(null); setVQtd(1); setVValor(""); setVComp(""); setVObs("");
+  }, [activeEvento, vendaPromId, vQtd, vValor, vComp, vObs, editingVendaId, updateEvento, showToast]);
 
   const removerVenda = useCallback((promId, vendaId) => {
-    if(!activeEvento) return;
+    if (!activeEvento) return;
     const evt = JSON.parse(JSON.stringify(activeEvento));
-    const idx = evt.promoters.findIndex(p=>p.id===promId);
-    if(idx<0) return;
-    evt.promoters[idx].vendas = evt.promoters[idx].vendas.filter(v=>v.id!==vendaId);
-    updateEvento(evt, `Venda removida — ${evt.promoters[idx].nome}`); show("Venda removida");
-  }, [activeEvento, updateEvento, show]);
+    const idx = evt.promoters.findIndex(p => p.id === promId); if (idx < 0) return;
+    const v = evt.promoters[idx].vendas.find(x => x.id === vendaId);
+    evt.promoters[idx].vendas = evt.promoters[idx].vendas.filter(x => x.id !== vendaId);
+    updateEvento(evt, `Venda removida — ${evt.promoters[idx].nome}`, "Promoters", `${v?.qtd}× R$${v?.valor}`);
+    showToast("🗑 Venda removida", "del");
+  }, [activeEvento, updateEvento, showToast]);
 
   const salvarCondicoes = useCallback(() => {
-    if(!activeEvento) return;
+    if (!activeEvento) return;
     const evt = JSON.parse(JSON.stringify(activeEvento));
-    if(!evt.condicoes) evt.condicoes={};
-    evt.condicoes[condicoesCat] = condicoesTexto;
-    updateEvento(evt, `Condições de venda da categoria "${condicoesCat}" atualizadas`);
-    setCondicoesModal(false); show("Condições salvas!");
-  }, [activeEvento, condicoesCat, condicoesTexto, updateEvento, show]);
+    if (!evt.condicoes) evt.condicoes = {};
+    evt.condicoes[condCat] = condTexto;
+    updateEvento(evt, `Condições de venda — ${condCat} atualizadas`, "Promoters", "");
+    setCondModal(false); showToast("✅ Condições salvas", "edit");
+  }, [activeEvento, condCat, condTexto, updateEvento, showToast]);
 
   /* ── SORTEIO ─────────────────────────────────────────────── */
-  const sorteioEvento = useMemo(()=>data.eventos.find(e=>e.id===sorteioEventoId)||null,[data,sorteioEventoId]);
-  const participantesDaAcaoSorteio = useMemo(()=>{
-    if(!sorteioEvento||!sorteioAcao) return [];
-    const acao = sorteioEvento.acoes.find(a=>a.id===sorteioAcao);
-    if(!acao) return [];
-    return sorteioEvento.divulgadoras.filter(d=>sorteioEvento.marcacoes[`${d.id}_${acao.id}`]==="OK");
-  },[sorteioEvento,sorteioAcao]);
+  const sortEvento = useMemo(() => data.eventos.find(e => e.id === sortEventoId) || null, [data, sortEventoId]);
+  const sortParticipantes = useMemo(() => {
+    if (!sortEvento || !sortAcao) return [];
+    const a = sortEvento.acoes.find(x => x.id === sortAcao); if (!a) return [];
+    return sortEvento.divulgadoras.filter(d => sortEvento.marcacoes[`${d.id}_${a.id}`] === "OK");
+  }, [sortEvento, sortAcao]);
 
-  const realizarSorteio = useCallback(()=>{
-    if(!participantesDaAcaoSorteio.length){show("Nenhuma participante","error");return;}
-    if(!sorteioTitulo.trim()){show("Informe o título","error");return;}
-    const qtd = Math.min(parseInt(sorteioQtd)||1,participantesDaAcaoSorteio.length);
-    setSorteioResult(null); setSorteioAnimating(true);
-    const pool=[...participantesDaAcaoSorteio];
-    const faces=["⚀","⚁","⚂","⚃","⚄","⚅"];
-    let count=0, total=30;
-    const iv=setInterval(()=>{
-      setSorteioAnimName(pool[Math.floor(Math.random()*pool.length)].nome);
-      setDiceFace(faces[Math.floor(Math.random()*6)]);
+  const realizarSorteio = useCallback(() => {
+    if (!sortParticipantes.length) { showToast("Nenhuma participante", "del"); return; }
+    if (!sortTitulo.trim()) { showToast("Informe o título", "del"); return; }
+    const qtd = Math.min(parseInt(sortQtd) || 1, sortParticipantes.length);
+    setSortResult(null); setSortAnimating(true);
+    const pool = [...sortParticipantes];
+    const faces = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"];
+    let count = 0;
+    const iv = setInterval(() => {
+      setSortAnimName(pool[Math.floor(Math.random() * pool.length)].nome);
+      setDiceFace(faces[Math.floor(Math.random() * 6)]);
       count++;
-      if(count>=total){
+      if (count >= 32) {
         clearInterval(iv);
-        const winners=[...pool].sort(()=>Math.random()-.5).slice(0,qtd);
-        setSorteioResult(winners); setSorteioAnimating(false); setSorteioAnimName("");
-        if(sorteioEvento){
-          const evt=JSON.parse(JSON.stringify(sorteioEvento));
-          if(!evt.sorteios) evt.sorteios=[];
-          if(!evt.nextSorteioId) evt.nextSorteioId=1;
-          const acao=evt.acoes.find(a=>a.id===sorteioAcao);
-          evt.sorteios.push({
-            id:`sort_${evt.nextSorteioId}`, titulo:sorteioTitulo, observacao:sorteioObs, premio:sортeioPremio,
-            acaoId:sorteioAcao, acaoNome:acao?`Ação ${acao.numero}${acao.nome!==`Ação ${acao.numero}`?` — ${acao.nome}`:""}` : "?",
-            vencedoras:winners.map(w=>({id:w.id,nome:w.nome,instagram:w.instagram})),
-            data:new Date().toISOString(),
-          });
+        const winners = [...pool].sort(() => Math.random() - .5).slice(0, qtd);
+        setSortResult(winners); setSortAnimating(false); setSortAnimName("");
+        if (sortEvento) {
+          const evt = JSON.parse(JSON.stringify(sortEvento));
+          if (!evt.sorteios) evt.sorteios = [];
+          if (!evt.nextSorteioId) evt.nextSorteioId = 1;
+          const a = evt.acoes.find(x => x.id === sortAcao);
+          evt.sorteios.push({ id: `sort_${evt.nextSorteioId}`, titulo: sortTitulo, premio: sortPremio, observacao: sortObs, acaoId: sortAcao, acaoNome: a ? `Ação ${a.numero}` : "?", vencedoras: winners.map(w => ({ id: w.id, nome: w.nome, instagram: w.instagram })), data: new Date().toISOString() });
           evt.nextSorteioId++;
-          let nd={...data,eventos:data.eventos.map(e=>e.id===evt.id?evt:e)};
-          nd=addLog(nd,`Sorteio "${sorteioTitulo}" realizado — ${evt.nome}`);
+          let nd = { ...data, eventos: data.eventos.map(e => e.id === evt.id ? evt : e) };
+          nd = addAudit(nd, "create", `Sorteio "${sortTitulo}" realizado`, "Sorteio", `Vencedora: ${winners[0]?.nome}`);
           save(nd);
         }
+        showToast("🎉 Sorteio realizado!");
       }
-    },80);
-  },[participantesDaAcaoSorteio,sorteioQtd,sorteioEvento,sorteioAcao,sorteioTitulo,sorteioObs,sортeioPremio,data,save,addLog,show]);
+    }, 80);
+  }, [sortParticipantes, sortQtd, sortEvento, sortAcao, sortTitulo, sortPremio, sortObs, data, addAudit, save, showToast]);
 
-  const removerSorteio = useCallback((evtId,sortId)=>{
-    const evt=data.eventos.find(e=>e.id===evtId); if(!evt) return;
-    const s=evt.sorteios?.find(x=>x.id===sortId);
-    const updatedEvt={...evt,sorteios:(evt.sorteios||[]).filter(x=>x.id!==sortId)};
-    let nd={...data,eventos:data.eventos.map(e=>e.id===evtId?updatedEvt:e)};
-    nd=addLog(nd,`Sorteio "${s?.titulo}" removido`,"danger");
-    save(nd); show("Sorteio removido");
-  },[data,save,addLog,show]);
+  const removerSorteio = useCallback((evtId, sortId) => {
+    const evt = data.eventos.find(e => e.id === evtId); if (!evt) return;
+    const s = evt.sorteios?.find(x => x.id === sortId);
+    const updatedEvt = { ...evt, sorteios: (evt.sorteios || []).filter(x => x.id !== sortId) };
+    let nd = { ...data, eventos: data.eventos.map(e => e.id === evtId ? updatedEvt : e) };
+    nd = addAudit(nd, "delete", `Sorteio "${s?.titulo}" removido`, "Sorteio", "");
+    save(nd); showToast("🗑 Sorteio removido", "del");
+  }, [data, addAudit, save, showToast]);
 
   /* ── REPORTS ─────────────────────────────────────────────── */
-  const generateReport = useCallback((evt)=>{
-    if(!evt) return [];
-    const s=calcStats(evt); if(!s) return [];
-    return (evt.metas||[]).sort((a,b)=>b.percentual-a.percentual).map(meta=>({
-      meta,
-      qualified:s.ranking.filter(r=>r.pct>=meta.percentual),
-      notQualified:s.ranking.filter(r=>r.pct<meta.percentual),
+  const generateReport = useCallback((evt) => {
+    if (!evt) return [];
+    const s = calcStats(evt); if (!s) return [];
+    return (evt.metas || []).sort((a, b) => b.percentual - a.percentual).map(meta => ({
+      meta, qualified: s.ranking.filter(r => r.pct >= meta.percentual), notQualified: s.ranking.filter(r => r.pct < meta.percentual),
     }));
-  },[calcStats]);
+  }, [calcStats]);
 
-  const exportCSV = useCallback((evt, tipo="parcial")=>{
-    if(!evt) return;
-    const s=calcStats(evt); const report=generateReport(evt);
-    let csv="\uFEFF";
-    csv+=`RELATÓRIO ${tipo.toUpperCase()} — ${evt.nome}\n`;
-    csv+=`Gerado em: ${new Date().toLocaleDateString("pt-BR")}\nTotal de Ações: ${evt.acoes.length}\nTotal de Divulgadoras: ${evt.divulgadoras.length}\n\n`;
-    for(const r of report){
-      csv+=`META: ${r.meta.label} (>= ${r.meta.percentual}%)\nClassificadas: ${r.qualified.length}\n`;
-      csv+=`Nome;Instagram;OKs;Total Ações;Percentual;Entrou na Ação\n`;
-      for(const q of r.qualified) csv+=`${q.nome};${q.instagram?"@"+q.instagram:""};${q.ok};${evt.acoes.length};${q.pct.toFixed(1)}%;Ação ${q.entradaAcao||"?"}\n`;
-      csv+=`\nNão classificadas:\n`;
-      for(const q of r.notQualified) csv+=`${q.nome};${q.instagram?"@"+q.instagram:""};${q.ok};${evt.acoes.length};${q.pct.toFixed(1)}%;Ação ${q.entradaAcao||"?"}\n`;
-      csv+="\n";
+  const exportCSV = useCallback((evt, tipo = "parcial") => {
+    if (!evt) return;
+    const s = calcStats(evt); const report = generateReport(evt);
+    let csv = "\uFEFF";
+    csv += `RELATÓRIO ${tipo.toUpperCase()} — ${evt.nome}\nGerado em: ${new Date().toLocaleDateString("pt-BR")}\nTotal Ações: ${evt.acoes.length}\nTotal Divulgadoras: ${evt.divulgadoras.length}\n\n`;
+    for (const r of report) {
+      csv += `META: ${r.meta.label} (>= ${r.meta.percentual}%)\nClassificadas: ${r.qualified.length}\nNome;Instagram;OKs;Total;%%;Entrou\n`;
+      for (const q of r.qualified) csv += `${q.nome};${q.instagram ? "@" + q.instagram : ""};${q.ok};${evt.acoes.length};${q.pct.toFixed(1)}%;Ação ${q.entradaAcao || "?"}\n`;
+      csv += `\nNão classificadas:\n`;
+      for (const q of r.notQualified) csv += `${q.nome};${q.instagram ? "@" + q.instagram : ""};${q.ok};${evt.acoes.length};${q.pct.toFixed(1)}%;Ação ${q.entradaAcao || "?"}\n`;
+      csv += "\n";
     }
-    if(evt.sorteios?.length){
-      csv+=`SORTEIOS\nTítulo;Prêmio;Ação;Data;Vencedoras;Observação\n`;
-      for(const sr of evt.sorteios){
-        const venc=sr.vencedoras.map(v=>`${v.nome}${v.instagram?" @"+v.instagram:""}`).join(" | ");
-        csv+=`${sr.titulo};${sr.premio||""};${sr.acaoNome};${new Date(sr.data).toLocaleString("pt-BR")};${venc};${sr.observacao||""}\n`;
-      }
-      csv+="\n";
+    if (evt.sorteios?.length) {
+      csv += `SORTEIOS\nTítulo;Prêmio;Ação;Data;Vencedoras;Obs\n`;
+      for (const sr of evt.sorteios) csv += `${sr.titulo};${sr.premio || ""};${sr.acaoNome};${new Date(sr.data).toLocaleString("pt-BR")};${sr.vencedoras.map(v => v.nome).join(" | ")};${sr.observacao || ""}\n`;
+      csv += "\n";
     }
-    if(evt.promoters?.length){
-      csv+=`PROMOTERS\nNome;Email;Link;Categoria;Total Ingressos;Total Vendas (R$)\n`;
-      for(const p of evt.promoters){
-        const totalQtd=(p.vendas||[]).reduce((s,v)=>s+v.qtd,0);
-        const totalVal=(p.vendas||[]).reduce((s,v)=>s+v.valor,0);
-        csv+=`${p.nome};${p.email};${p.link};${p.categoria||""};${totalQtd};${totalVal.toFixed(2)}\n`;
+    if (evt.promoters?.length) {
+      csv += `PROMOTERS\nNome;Email;Categoria;Ingressos;Total R$\n`;
+      for (const p of evt.promoters) {
+        const tQ = (p.vendas || []).reduce((s, v) => s + v.qtd, 0), tV = (p.vendas || []).reduce((s, v) => s + (v.qtd * v.valor), 0);
+        csv += `${p.nome};${p.email};${p.categoria};${tQ};${tV.toFixed(2)}\n`;
       }
-      csv+=`\nVENDAS DETALHADAS\nPromoter;Qtd Ingressos;Valor Unit.;Total;Observação;Data\n`;
-      for(const p of evt.promoters){
-        for(const v of (p.vendas||[])){
-          csv+=`${p.nome};${v.qtd};${v.valor.toFixed(2)};${(v.qtd*v.valor).toFixed(2)};${v.obs||""};${new Date(v.data).toLocaleString("pt-BR")}\n`;
-        }
-      }
+      csv += `\nVENDAS DETALHADAS\nPromoter;Qtd;Valor/un;Total;Comp;Obs;Data\n`;
+      for (const p of evt.promoters) for (const v of (p.vendas || [])) csv += `${p.nome};${v.qtd};${v.valor.toFixed(2)};${(v.qtd * v.valor).toFixed(2)};${v.comprovante || ""};${v.obs || ""};${new Date(v.data).toLocaleString("pt-BR")}\n`;
     }
-    dl(csv, `relatorio_${tipo}_${evt.nome.replace(/\s/g,"_")}.csv`,"text/csv;charset=utf-8");
-    show(`Relatório ${tipo} exportado!`);
-  },[calcStats,generateReport,show]);
+    dl(csv, `relatorio_${tipo}_${evt.nome.replace(/\s/g, "_")}.csv`, "text/csv;charset=utf-8");
+    let nd = addAudit(data, "export", `Relatório ${tipo} exportado`, "Relatórios", evt.nome);
+    save(nd);
+    showToast(`📊 Relatório ${tipo} exportado!`);
+  }, [calcStats, generateReport, data, addAudit, save, showToast]);
 
-  const exportGeralCSV = useCallback(()=>{
-    let csv="\uFEFF";
-    csv+=`RELATÓRIO GERAL VSLT — ${new Date().toLocaleDateString("pt-BR")}\n\n`;
-    for(const evt of data.eventos){
-      const s=calcStats(evt);
-      csv+=`══════════════════════════════════\n`;
-      csv+=`EVENTO: ${evt.nome}${evt.dataEvento?" — "+evt.dataEvento:""}${evt.encerrado?" [ENCERRADO]":""}\n`;
-      csv+=`Divulgadoras: ${evt.divulgadoras.length} | Ações: ${evt.acoes.length} | Média: ${s?s.avg.toFixed(1)+"%" : "—"}\n\n`;
-      if(s&&evt.acoes.length){
-        csv+=`RANKING DIVULGADORAS\nNome;Instagram;OKs;Total Ações;%;Entrou na Ação\n`;
-        for(const r of s.ranking) csv+=`${r.nome};${r.instagram?"@"+r.instagram:""};${r.ok};${evt.acoes.length};${r.pct.toFixed(1)}%;Ação ${r.entradaAcao||"?"}\n`;
-        csv+="\n";
-      }
-      if(evt.sorteios?.length){
-        csv+=`SORTEIOS\nTítulo;Prêmio;Data;Vencedoras\n`;
-        for(const sr of evt.sorteios){
-          csv+=`${sr.titulo};${sr.premio||""};${new Date(sr.data).toLocaleString("pt-BR")};${sr.vencedoras.map(v=>v.nome).join(" | ")}\n`;
-        }
-        csv+="\n";
-      }
-      if(evt.promoters?.length){
-        csv+=`PROMOTERS\nNome;Categoria;Total Ingressos;Total R$\n`;
-        for(const p of evt.promoters){
-          const tQ=(p.vendas||[]).reduce((s,v)=>s+v.qtd,0);
-          const tV=(p.vendas||[]).reduce((s,v)=>s+v.valor,0);
-          csv+=`${p.nome};${p.categoria||""};${tQ};${tV.toFixed(2)}\n`;
-        }
-        csv+="\n";
-      }
-      csv+="\n";
+  const exportGeral = useCallback(() => {
+    let csv = "\uFEFF";
+    csv += `RELATÓRIO GERAL VSLT — ${new Date().toLocaleDateString("pt-BR")}\n\n`;
+    for (const evt of data.eventos) {
+      const s = calcStats(evt);
+      csv += `══ EVENTO: ${evt.nome} ${evt.encerrado ? "[ENCERRADO]" : ""}\nDivulg.: ${evt.divulgadoras.length} | Ações: ${evt.acoes.length} | Média: ${s ? s.avg.toFixed(1) + "%" : "—"}\n\n`;
+      if (s?.ranking.length) { csv += `RANKING\nNome;OK;%;Entrou\n`; for (const r of s.ranking) csv += `${r.nome};${r.ok};${r.pct.toFixed(1)}%;Ação ${r.entradaAcao || "?"}\n`; csv += "\n"; }
+      if (evt.sorteios?.length) { csv += `SORTEIOS\nTítulo;Prêmio;Data;Vencedoras\n`; for (const sr of evt.sorteios) csv += `${sr.titulo};${sr.premio || ""};${new Date(sr.data).toLocaleString("pt-BR")};${sr.vencedoras.map(v => v.nome).join(" | ")}\n`; csv += "\n"; }
+      if (evt.promoters?.length) { csv += `PROMOTERS\nNome;Cat;Ingressos;Total R$\n`; for (const p of evt.promoters) { const tQ = (p.vendas || []).reduce((s, v) => s + v.qtd, 0), tV = (p.vendas || []).reduce((s, v) => s + (v.qtd * v.valor), 0); csv += `${p.nome};${p.categoria};${tQ};${tV.toFixed(2)}\n`; } csv += "\n"; }
+      csv += "\n";
     }
-    dl(csv,`relatorio_geral_vslt.csv`,"text/csv;charset=utf-8");
-    show("Relatório geral exportado!");
-  },[data,calcStats,show]);
+    dl(csv, `relatorio_geral_vslt.csv`, "text/csv;charset=utf-8");
+    let nd = addAudit(data, "export", "Relatório geral exportado", "Relatórios", "Todos os eventos");
+    save(nd);
+    showToast("📑 Relatório geral exportado!");
+  }, [data, calcStats, addAudit, save, showToast]);
 
-  const exportJSON = useCallback(()=>{
-    dl(JSON.stringify(data,null,2),`vslt_backup.json`,"application/json");
-    show("Backup exportado!");
-  },[data,show]);
-
-  const importJSON = useCallback((e)=>{
-    const file=e.target.files[0]; if(!file) return;
-    const reader=new FileReader();
-    reader.onload=(ev)=>{ try{ save({...defaultState,...JSON.parse(ev.target.result)}); setView(VIEWS.HOME); show("Dados restaurados!"); }catch{ show("Erro no arquivo","error"); } };
+  const exportJSON = useCallback(() => { dl(JSON.stringify(data, null, 2), "vslt_backup.json", "application/json"); showToast("💾 Backup exportado!"); }, [data, showToast]);
+  const importJSON = useCallback((e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => { try { save({ ...defaultState, ...JSON.parse(ev.target.result) }); setView(VIEWS.HOME); showToast("📂 Dados restaurados!"); } catch { showToast("Erro no arquivo", "del"); } };
     reader.readAsText(file);
-  },[save,show]);
+  }, [save, showToast]);
 
-  function dl(content, filename, type){
-    const blob=new Blob([content],{type}); const url=URL.createObjectURL(blob);
-    const a=document.createElement("a"); a.href=url; a.download=filename; a.click(); URL.revokeObjectURL(url);
+  function dl(content, filename, type) {
+    const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
   }
 
-  if(loading) return(
-    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100vh",background:"#0a0a0f"}}>
-      <div style={{fontSize:40,animation:"pulse 1.5s infinite"}}>🎯</div>
-      <div style={{fontSize:11,letterSpacing:3,color:"#555",marginTop:12,textTransform:"uppercase"}}>Carregando...</div>
+  /* ══════════════════════════════════════════════════════════
+     RENDER
+  ══════════════════════════════════════════════════════════ */
+  if (loading) return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100vh", background: "#07070d" }}>
+      <div style={{ fontSize: 40, animation: "pulse 1.5s infinite" }}>🎯</div>
+      <div style={{ fontSize: 11, letterSpacing: 3, color: "#555", marginTop: 12, textTransform: "uppercase" }}>Carregando...</div>
     </div>
   );
 
-  const evtTabs=[
-    {id:"dashboard",icon:"📊",label:"Dashboard"},
-    {id:"importar",icon:"📥",label:"Importar Ação"},
-    {id:"divulgadoras",icon:"👥",label:"Divulgadoras"},
-    {id:"tabela",icon:"📋",label:"Tabela"},
-    {id:"metas",icon:"🎯",label:"Metas"},
-    {id:"promoters",icon:"🔗",label:"Promoters"},
-    {id:"lista",icon:"🏆",label:"Lista Final"},
+  if (!currentUser) return <LoginScreen loginUser={loginUser} setLoginUser={setLoginUser} loginPass={loginPass} setLoginPass={setLoginPass} loginErr={loginErr} doLogin={doLogin} />;
+
+  const users = data.users || defaultState.users;
+  const activeUser = users[currentUser] || { name: "Admin", color: "#8b5cf6", role: "Administrador" };
+
+  const navItems = [
+    { key: VIEWS.HOME, icon: "🏠", label: "Eventos", pill: data.eventos.length },
+    { key: VIEWS.SORTEIO, icon: "🎲", label: "Sorteio" },
+    { key: VIEWS.STATS, icon: "📈", label: "Estatísticas" },
+    { key: VIEWS.RELATORIOS, icon: "📑", label: "Relatórios" },
+    { key: VIEWS.AUDITORIA, icon: "🔍", label: "Auditoria", pill: (data.auditLog || []).length, pillColor: "#ef4444" },
+    { key: VIEWS.LOGS, icon: "🕐", label: "Logs" },
   ];
 
-  const navItems=[
-    {key:VIEWS.HOME,icon:"🏠",label:"Eventos"},
-    {key:VIEWS.SORTEIO,icon:"🎲",label:"Sorteio"},
-    {key:VIEWS.ESTATISTICAS,icon:"📈",label:"Estatísticas"},
-    {key:VIEWS.RELATORIOS,icon:"📑",label:"Relatórios"},
-    {key:VIEWS.LOGS,icon:"🕐",label:"Logs"},
+  const evtTabs = [
+    { id: "dashboard", icon: "📊", label: "Dashboard" },
+    { id: "importar", icon: "📥", label: "Importar" },
+    { id: "divulgadoras", icon: "👥", label: "Divulgadoras" },
+    { id: "tabela", icon: "📋", label: "Tabela" },
+    { id: "metas", icon: "🎯", label: "Metas" },
+    { id: "promoters", icon: "🔗", label: "Promoters" },
+    { id: "lista", icon: "🏆", label: "Lista Final" },
   ];
 
-  return(
-    <div style={{minHeight:"100vh",background:"#0a0a0f",color:"#e0e0e0",fontFamily:"'DM Sans',sans-serif",display:"flex"}}>
-      <style>{CSS}</style>
+  const auditTypes = { create: "at-create", edit: "at-edit", delete: "at-delete", export: "at-export", system: "at-system" };
+  const auditLabels = { create: "➕ Criação", edit: "✏️ Edição", delete: "🗑 Exclusão", export: "📤 Exportação", system: "⚙️ Sistema" };
+  const filteredAudit = auditFilter === "all" ? (data.auditLog || []) : (data.auditLog || []).filter(l => l.type === auditFilter);
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#07070d", color: "#e2e8f0", fontFamily: "'Inter',system-ui,sans-serif", fontSize: 14, display: "flex" }}>
+      <style>{GLOBAL_CSS}</style>
+
+      {/* TOAST */}
       {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
 
-      {/* ══ SIDEBAR ══ */}
-      <div style={{width:200,minHeight:"100vh",background:"#0d0d17",borderRight:"1px solid #1a1a28",display:"flex",flexDirection:"column",position:"fixed",top:0,left:0,bottom:0,zIndex:50}}>
-        <div style={{padding:"20px 16px 16px",borderBottom:"1px solid #1a1a28"}}>
-          <div style={{fontSize:9,letterSpacing:4,color:"#555",textTransform:"uppercase",marginBottom:3}}>VSLT Produções</div>
-          <div style={{fontSize:14,fontWeight:800,background:"linear-gradient(135deg,#c8a2ff,#7a5af5)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>Divulgadoras v5</div>
+      {/* SIDEBAR */}
+      <div className="sidebar">
+        <div className="sb-head">
+          <div className="sb-brand">VSLT</div>
+          <div className="sb-sub">Produções — v7</div>
         </div>
-        <nav style={{flex:1,padding:"12px 8px",overflowY:"auto"}}>
-          {navItems.map(item=>(
-            <button key={item.key} className={`nav-item ${(view===item.key||(view===VIEWS.EVENTO&&item.key===VIEWS.HOME))?"nav-active":""}`}
-              onClick={()=>{ if(item.key===VIEWS.HOME){save({...data,activeEventoId:null});setView(VIEWS.HOME);}else setView(item.key); }}>
-              <span>{item.icon}</span><span>{item.label}</span>
+        <nav className="sb-nav">
+          {navItems.map(item => (
+            <button key={item.key} className={`nb ${(view === item.key || (view === VIEWS.EVENTO && item.key === VIEWS.HOME)) ? "active" : ""}`}
+              onClick={() => { if (item.key === VIEWS.HOME) { save({ ...data, activeEventoId: null }); } setView(item.key); }}>
+              <span className="nb-ic">{item.icon}</span>
+              <span style={{ flex: 1 }}>{item.label}</span>
+              {item.pill > 0 && <span className="nb-pill" style={item.pillColor ? { background: `${item.pillColor}25`, color: item.pillColor } : {}}>{item.pill}</span>}
             </button>
           ))}
-          {data.eventos.length>0&&(
-            <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid #1a1a28"}}>
-              <div style={{fontSize:9,color:"#444",letterSpacing:2,textTransform:"uppercase",padding:"0 8px",marginBottom:6}}>Eventos</div>
-              {data.eventos.map(evt=>(
-                <button key={evt.id} className={`nav-item ${data.activeEventoId===evt.id&&view===VIEWS.EVENTO?"nav-active":""}`}
-                  onClick={()=>abrirEvento(evt.id)} style={{fontSize:11}}>
-                  <span>{evt.encerrado?"🔒":"🟢"}</span>
-                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:120}}>{evt.nome}</span>
+          {data.eventos.length > 0 && (
+            <>
+              <div className="sb-sec">Eventos</div>
+              {data.eventos.map(evt => (
+                <button key={evt.id} className={`eb ${data.activeEventoId === evt.id && view === VIEWS.EVENTO ? "active" : ""}`} onClick={() => abrirEvento(evt.id)}>
+                  <div className={`edot ${evt.encerrado ? "closed" : ""}`} />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{evt.nome}</span>
                 </button>
               ))}
-            </div>
+            </>
           )}
         </nav>
-        <div style={{padding:"12px 8px",borderTop:"1px solid #1a1a28",display:"flex",gap:6}}>
-          <button className="btn btn-ghost" onClick={exportJSON} style={{flex:1,padding:"6px",fontSize:10}}>💾</button>
-          <label className="btn btn-ghost" style={{flex:1,padding:"6px",fontSize:10,cursor:"pointer",textAlign:"center"}}>
-            📂<input type="file" accept=".json" onChange={importJSON} style={{display:"none"}}/>
-          </label>
+        <div className="sb-foot">
+          <div className="urow">
+            <div className="uav" style={{ background: `linear-gradient(135deg,${activeUser.color},${activeUser.color}99)` }}>{activeUser.name[0]}</div>
+            <div><div className="uname">{activeUser.name}</div><div className="urole">{activeUser.role}</div></div>
+            <button className="uout" onClick={doLogout} title="Sair">⏻</button>
+          </div>
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <button className="btn bg" style={{ flex: 1, padding: "6px", fontSize: 11, justifyContent: "center" }} onClick={exportJSON}>💾 Backup</button>
+            <label className="btn bg" style={{ flex: 1, padding: "6px", fontSize: 11, justifyContent: "center", cursor: "pointer" }}>
+              📂<input type="file" accept=".json" onChange={importJSON} style={{ display: "none" }} />
+            </label>
+          </div>
         </div>
       </div>
 
-      {/* ══ MAIN ══ */}
-      <div style={{marginLeft:200,flex:1,padding:"28px 32px"}}>
+      {/* MAIN */}
+      <div className="main">
 
-        {/* HOME */}
-        {view===VIEWS.HOME&&(
-          <div style={{animation:"fadeIn .3s"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
-              <div>
-                <div style={{fontSize:22,fontWeight:800}}>Eventos</div>
-                <div style={{fontSize:12,color:"#555",marginTop:2}}>{data.eventos.length} evento{data.eventos.length!==1?"s":""}</div>
-              </div>
-              <button className="btn btn-accent" onClick={()=>setView(VIEWS.CRIAR_EVENTO)}>+ Novo Evento</button>
+        {/* ══ HOME ══ */}
+        {view === VIEWS.HOME && (
+          <div className="page-in">
+            <div className="ph">
+              <div><div className="ph-t">🎪 Eventos</div><div className="ph-s">{data.eventos.length} evento{data.eventos.length !== 1 ? "s" : ""} cadastrado{data.eventos.length !== 1 ? "s" : ""}</div></div>
+              <button className="btn bp" onClick={() => setView(VIEWS.CRIAR)}>+ Novo Evento</button>
             </div>
-            {data.eventos.length===0?(
-              <div className="empty-state"><div style={{fontSize:48,marginBottom:12}}>🎪</div><div style={{fontSize:15,fontWeight:600}}>Nenhum evento cadastrado</div></div>
-            ):(
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:16}}>
-                {data.eventos.map(evt=>{
-                  const s=calcStats(evt);
-                  const totalIngressos=(evt.promoters||[]).reduce((sum,p)=>(p.vendas||[]).reduce((s2,v)=>s2+v.qtd,0)+sum,0);
-                  return(
-                    <div key={evt.id} className="card evt-card" onClick={()=>abrirEvento(evt.id)}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-                        <div style={{fontSize:15,fontWeight:700,flex:1,marginRight:8}}>{evt.nome}</div>
-                        <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
-                          {evt.encerrado&&<span className="badge" style={{background:"#ff6b6b22",color:"#ff6b6b",fontSize:9}}>ENC.</span>}
-                          <button className="btn btn-danger" style={{padding:"3px 8px",fontSize:10}} onClick={e=>{e.stopPropagation();deletarEvento(evt.id);}}>✕</button>
+            {data.eventos.length === 0 ? (
+              <div className="empty"><div style={{ fontSize: 48, marginBottom: 12 }}>🎪</div><div style={{ fontSize: 15, fontWeight: 700 }}>Nenhum evento cadastrado</div></div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 16 }}>
+                {data.eventos.map(evt => {
+                  const s = calcStats(evt);
+                  const totalIngressos = (evt.promoters || []).reduce((sum, p) => (p.vendas || []).reduce((s2, v) => s2 + v.qtd, 0) + sum, 0);
+                  return (
+                    <div key={evt.id} className="evt-card" onClick={() => abrirEvento(evt.id)}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                        <div style={{ fontSize: 15, fontWeight: 800, flex: 1, marginRight: 8 }}>{evt.nome}</div>
+                        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                          {evt.encerrado && <span className="badge br" style={{ fontSize: 9 }}>ENC.</span>}
+                          <button className="btn bd bsm" onClick={e => { e.stopPropagation(); deletarEvento(evt.id); }}>✕</button>
                         </div>
                       </div>
-                      {evt.dataEvento&&<div style={{fontSize:11,color:"#555",marginBottom:8}}>📅 {evt.dataEvento}</div>}
-                      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:8}}>
-                        {[{n:evt.divulgadoras.length,l:"DIVULG.",c:"#c8a2ff"},{n:evt.acoes.length,l:"AÇÕES",c:"#7affc1"},{n:(evt.promoters||[]).length,l:"PROMO.",c:"#ffd97a"},{n:totalIngressos,l:"INGRESSOS",c:"#ff8a7a"}].map((st,i)=>(
-                          <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-                            <span style={{fontFamily:"'Space Mono',monospace",fontSize:16,fontWeight:700,color:st.c}}>{st.n}</span>
-                            <span style={{fontSize:9,color:"#555"}}>{st.l}</span>
+                      {evt.dataEvento && <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8 }}>📅 {evt.dataEvento}</div>}
+                      <div style={{ display: "flex", gap: 14, marginTop: 10 }}>
+                        {[{ n: evt.divulgadoras.length, l: "DIVULG.", c: "#a78bfa" }, { n: evt.acoes.length, l: "AÇÕES", c: "#34d399" }, { n: (evt.promoters || []).length, l: "PROMO.", c: "#fbbf24" }, { n: totalIngressos, l: "INGR.", c: "#f87171" }].map((st, i) => (
+                          <div key={i} style={{ textAlign: "center" }}>
+                            <div style={{ fontFamily: "monospace", fontSize: 18, fontWeight: 800, color: st.c }}>{st.n}</div>
+                            <div style={{ fontSize: 9, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>{st.l}</div>
                           </div>
                         ))}
                       </div>
@@ -692,929 +784,762 @@ export default function App() {
           </div>
         )}
 
-        {/* CRIAR EVENTO */}
-        {view===VIEWS.CRIAR_EVENTO&&(
-          <div style={{animation:"fadeIn .3s",maxWidth:560}}>
-            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24}}>
-              <button className="btn btn-ghost" onClick={()=>setView(VIEWS.HOME)}>← Voltar</button>
-              <span style={{fontSize:18,fontWeight:800}}>Novo Evento</span>
+        {/* ══ CRIAR EVENTO ══ */}
+        {view === VIEWS.CRIAR && (
+          <div className="page-in" style={{ maxWidth: 560 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+              <button className="btn bg bsm" onClick={() => setView(VIEWS.HOME)}>← Voltar</button>
+              <span style={{ fontSize: 20, fontWeight: 800 }}>Novo Evento</span>
             </div>
-            <div className="card" style={{marginBottom:14}}>
-              <label className="field-label">Nome do Evento</label>
-              <input value={novoEvtNome} onChange={e=>setNovoEvtNome(e.target.value)} placeholder="Ex: Never Ends 5 Anos"/>
-            </div>
-            <div className="card" style={{marginBottom:14}}>
-              <label className="field-label">Data do Evento</label>
-              <input value={novoEvtData} onChange={e=>setNovoEvtData(e.target.value)} placeholder="Ex: 15/03/2026"/>
-            </div>
-            <div className="card" style={{marginBottom:14}}>
-              <label className="field-label">Metas de Divulgação</label>
-              {novoEvtMetas.map((m,i)=>(
-                <div key={i} style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
-                  <input value={m.label} onChange={e=>{const c=[...novoEvtMetas];c[i].label=e.target.value;setNovoEvtMetas(c);}} placeholder="Ex: Ouro" style={{flex:1}}/>
-                  <input value={m.percentual} onChange={e=>{const c=[...novoEvtMetas];c[i].percentual=e.target.value;setNovoEvtMetas(c);}} placeholder="%" style={{width:70,textAlign:"center"}} type="number" min="0" max="100"/>
-                  <span style={{color:"#666",fontSize:12}}>%</span>
-                  {novoEvtMetas.length>1&&<button className="btn btn-danger" style={{padding:"4px 8px",fontSize:10}} onClick={()=>setNovoEvtMetas(novoEvtMetas.filter((_,j)=>j!==i))}>✕</button>}
+            <div className="card" style={{ marginBottom: 14 }}><Field label="Nome do Evento"><input style={inp} value={novoNome} onChange={e => setNovoNome(e.target.value)} placeholder="Ex: Never Ends 5 Anos" /></Field></div>
+            <div className="card" style={{ marginBottom: 14 }}><Field label="Data do Evento"><input style={inp} value={novoData} onChange={e => setNovoData(e.target.value)} placeholder="Ex: 15/03/2026" /></Field></div>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="ct">Metas de Divulgação</div>
+              {novoMetas.map((m, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                  <input style={{ ...inp, flex: 1 }} value={m.label} onChange={e => { const c = [...novoMetas]; c[i].label = e.target.value; setNovoMetas(c); }} placeholder="Ex: Ouro" />
+                  <input style={{ ...inp, width: 80, textAlign: "center" }} type="number" value={m.percentual} onChange={e => { const c = [...novoMetas]; c[i].percentual = e.target.value; setNovoMetas(c); }} placeholder="%" />
+                  <span style={{ color: "#64748b" }}>%</span>
+                  {novoMetas.length > 1 && <button className="btn bd bsm" onClick={() => setNovoMetas(novoMetas.filter((_, j) => j !== i))}>✕</button>}
                 </div>
               ))}
-              <button className="btn btn-ghost" style={{fontSize:11,marginTop:4}} onClick={()=>setNovoEvtMetas([...novoEvtMetas,{label:"",percentual:""}])}>+ Adicionar faixa</button>
+              <button className="btn bg bsm" onClick={() => setNovoMetas([...novoMetas, { label: "", percentual: "" }])}>+ Adicionar faixa</button>
             </div>
-            <button className="btn btn-accent" style={{width:"100%",padding:14,fontSize:14}} onClick={criarEvento}>Criar Evento</button>
+            <button className="btn bp" style={{ width: "100%", padding: 14, fontSize: 15, justifyContent: "center" }} onClick={criarEvento}>Criar Evento</button>
           </div>
         )}
 
-        {/* EVENTO */}
-        {view===VIEWS.EVENTO&&activeEvento&&(
-          <div style={{animation:"fadeIn .3s"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+        {/* ══ EVENTO ══ */}
+        {view === VIEWS.EVENTO && activeEvento && (
+          <div className="page-in">
+            <div style={{ background: "linear-gradient(135deg,rgba(139,92,246,.1),rgba(124,58,237,.05))", border: "1px solid rgba(139,92,246,.2)", borderRadius: 16, padding: "18px 22px", marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
-                <div style={{display:"flex",alignItems:"center",gap:10}}>
-                  <span style={{fontSize:20,fontWeight:800}}>{activeEvento.nome}</span>
-                  {activeEvento.encerrado&&<span className="badge" style={{background:"#ff6b6b22",color:"#ff6b6b",fontSize:9}}>ENCERRADO</span>}
-                  <button className="btn btn-ghost" style={{padding:"3px 10px",fontSize:10}} onClick={()=>{setEditEvtNome(activeEvento.nome);setEditEvtData(activeEvento.dataEvento||"");setShowEditEvt(true);}}>✏️ Editar</button>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 19, fontWeight: 800 }}>{activeEvento.nome}</span>
+                  {activeEvento.encerrado && <span className="badge br" style={{ fontSize: 10 }}>ENCERRADO</span>}
+                  <button className="btn bg bsm" onClick={() => { setEditEvtNome(activeEvento.nome); setEditEvtData(activeEvento.dataEvento || ""); setEditEvtModal(true); }}>✏️</button>
                 </div>
-                <div style={{fontSize:11,color:"#666",marginTop:2}}>
-                  {activeEvento.dataEvento&&`📅 ${activeEvento.dataEvento} • `}
-                  {activeEvento.divulgadoras.length} divulg. • {activeEvento.acoes.length} ações • {(activeEvento.promoters||[]).length} promoters
-                </div>
+                <div style={{ fontSize: 12, color: "#64748b", marginTop: 3 }}>{activeEvento.dataEvento && `📅 ${activeEvento.dataEvento} · `}{activeEvento.divulgadoras.length} divulg. · {activeEvento.acoes.length} ações · {(activeEvento.promoters || []).length} promoters</div>
               </div>
-              <div style={{display:"flex",gap:8}}>
-                {activeEvento.encerrado
-                  ?<button className="btn btn-ghost" style={{fontSize:11}} onClick={reabrirEvento}>🔓 Reabrir</button>
-                  :<button className="btn btn-danger" style={{fontSize:11}} onClick={()=>setShowEncerrar(true)}>🔒 Encerrar</button>}
-                <button className="btn btn-accent" style={{fontSize:11}} onClick={()=>setShowExport(true)}>📤 Exportar</button>
+              <div style={{ display: "flex", gap: 9 }}>
+                {activeEvento.encerrado ? <button className="btn bg bsm" onClick={reabrirEvento}>🔓 Reabrir</button> : <button className="btn bd bsm" onClick={() => setShowEncerrar(true)}>🔒 Encerrar</button>}
+                <button className="btn bp bsm" onClick={() => setShowExport(true)}>📤 Exportar</button>
               </div>
             </div>
-            <div style={{display:"flex",borderBottom:"1px solid #1a1a28",marginBottom:24,overflowX:"auto"}}>
-              {evtTabs.map(t=>(
-                <button key={t.id} className={`tab ${evtTab===t.id?"active":""}`} onClick={()=>setEvtTab(t.id)}>{t.icon} {t.label}</button>
+
+            <div className="tabs">
+              {evtTabs.map(t => (
+                <button key={t.id} className={`tab ${evtTab === t.id ? "active" : ""}`} onClick={() => setEvtTab(t.id)}>
+                  <span style={{ fontSize: 17 }}>{t.icon}</span>{t.label}
+                </button>
               ))}
             </div>
-            <div style={{maxWidth:1100}}>
 
-              {/* ── DASHBOARD ── */}
-              {evtTab==="dashboard"&&(
-                <>
-                  {activeEvento.encerrado&&(
-                    <div style={{background:"#ff6b6b11",border:"1px solid #ff6b6b33",borderRadius:10,padding:"10px 16px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                      <span style={{fontSize:12,color:"#ff8a7a"}}>🔒 Encerrado — % sobre {activeEvento.acoes.length} ações totais</span>
-                      <button className="btn btn-ghost" style={{fontSize:10}} onClick={reabrirEvento}>Reabrir</button>
+            {/* DASHBOARD TAB */}
+            {evtTab === "dashboard" && (
+              <div className="page-in">
+                <div className="sg">
+                  {[{ n: activeEvento.divulgadoras.length, l: "Divulgadoras", c: "#a78bfa", ic: "👩‍💼" }, { n: activeEvento.acoes.length, l: "Ações", c: "#34d399", ic: "⚡" }, { n: stats?.topCount || 0, l: "100% Presença", c: "#fbbf24", ic: "🏆" }, { n: `${stats?.avg.toFixed(0) || 0}%`, l: "Média Geral", c: "#f87171", ic: "📊" }].map((s, i) => (
+                    <div key={i} className="sc" style={{ borderTop: `3px solid ${s.c}` }}><span className="sc-ic">{s.ic}</span><div className="sc-n" style={{ color: s.c }}>{s.n}</div><div className="sc-l">{s.l}</div></div>
+                  ))}
+                </div>
+                {stats && stats.ranking.length > 0 && (
+                  <div className="g2">
+                    <div className="card">
+                      <div className="ct">🏆 Top 15</div>
+                      {stats.ranking.slice(0, 15).map((r, i) => (
+                        <div key={r.id} className="rr">
+                          <span className="rpos" style={{ color: i < 3 ? ["#fbbf24", "#b0b0b0", "#d4956a"][i] : "#555" }}>{i < 3 ? ["🥇", "🥈", "🥉"][i] : `${i + 1}°`}</span>
+                          <div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 600 }}>{r.nome}</div>{r.instagram && <div style={{ fontSize: 11, color: "#a78bfa" }}>@{r.instagram}</div>}</div>
+                          <div><span style={{ fontSize: 15, fontWeight: 800, color: r.pct === 100 ? "#34d399" : r.pct >= 75 ? "#fbbf24" : "#f87171" }}>{r.pct.toFixed(0)}%</span></div>
+                        </div>
+                      ))}
                     </div>
-                  )}
-                  {!stats||!activeEvento.acoes.length?(
-                    <div className="empty-state"><div style={{fontSize:48}}>📊</div><div style={{fontSize:15,fontWeight:600,marginTop:8}}>Nenhuma ação registrada</div></div>
-                  ):(
-                    <>
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
-                        {[{n:activeEvento.divulgadoras.length,l:"Divulgadoras",c:"#c8a2ff"},{n:activeEvento.acoes.length,l:"Ações",c:"#7affc1"},{n:stats.topCount,l:"100% Presença",c:"#ffd97a"},{n:`${stats.avg.toFixed(0)}%`,l:"Média Geral",c:"#ff8a7a"}].map((s,i)=>(
-                          <div key={i} className="stat-card"><div className="stat-num" style={{color:s.c}}>{s.n}</div><div className="stat-label">{s.l}</div></div>
-                        ))}
-                      </div>
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-                        <div className="card">
-                          <div className="section-title" style={{marginBottom:12}}>🏆 Top 15</div>
-                          {stats.ranking.slice(0,15).map((r,i)=>(
-                            <div className="rank-row" key={r.id}>
-                              <div className="rank-pos" style={{color:i<3?["#ffd97a","#b0b0b0","#d4956a"][i]:"#444"}}>{i<3?["🥇","🥈","🥉"][i]:`${i+1}°`}</div>
-                              <div style={{flex:1}}><div style={{fontSize:12,fontWeight:500}}>{r.nome}</div>{r.instagram&&<div style={{color:"#c8a2ff",fontSize:10}}>@{r.instagram}</div>}</div>
-                              <div><span style={{fontFamily:"'Space Mono',monospace",fontSize:12,fontWeight:700,color:r.pct===100?"#7affc1":r.pct>=75?"#ffd97a":"#ff8a7a"}}>{r.pct.toFixed(0)}%</span><span style={{fontSize:9,color:"#555",marginLeft:4}}>{r.ok}/{activeEvento.acoes.length}</span></div>
-                            </div>
-                          ))}
+                    <div className="card">
+                      <div className="ct">📈 OKs por Ação</div>
+                      {stats.acaoStats.map(a => (
+                        <div key={a.id} style={{ marginBottom: 11 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}><span>Ação {a.numero}</span><span style={{ color: "#64748b" }}>{a.ok}/{a.total}</span></div>
+                          <div className="prog"><div className="pf" style={{ width: `${a.total ? (a.ok / a.total) * 100 : 0}%` }} /></div>
                         </div>
-                        <div className="card">
-                          <div className="section-title" style={{marginBottom:12}}>📈 Participação por Ação</div>
-                          {stats.acaoStats.map(a=>(
-                            <div key={a.id} style={{marginBottom:10}}>
-                              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:3}}>
-                                <span style={{fontWeight:500}}>Ação {a.numero}</span>
-                                <span style={{color:"#888",fontFamily:"'Space Mono',monospace"}}>{a.ok}/{a.total}</span>
-                              </div>
-                              <div className="prog-bar"><div className="prog-fill" style={{width:`${a.total?((a.ok/a.total)*100):0}%`}}/></div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </>
-              )}
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
-              {/* ── IMPORTAR ── */}
-              {evtTab==="importar"&&(
-                <div style={{maxWidth:650}}>
-                  {!activeEvento.encerrado&&!editingAcaoId&&(
-                    <div className="card" style={{marginBottom:16}}>
-                      <div className="section-title" style={{marginBottom:12}}>📥 Importar Nova Ação</div>
-                      <div style={{background:"#0a0a16",border:"1px solid #1a1a2e",borderRadius:8,padding:"9px 12px",marginBottom:14,fontSize:11,color:"#666",lineHeight:1.7}}>
-                        <strong style={{color:"#c8a2ff"}}>Parser inteligente:</strong> todo <strong style={{color:"#7affc1"}}>@</strong> é Instagram • antes da <strong style={{color:"#7affc1"}}>/</strong> é o nome
-                      </div>
-                      <div style={{display:"flex",gap:8,marginBottom:12}}>
-                        <div style={{flex:"0 0 100px"}}>
-                          <label style={{fontSize:10,color:"#666",marginBottom:4,display:"block"}}>Nº da Ação</label>
-                          <input value={acaoNumero} onChange={e=>setAcaoNumero(e.target.value)} placeholder={`${activeEvento.acoes.length+1}`} type="number" min="1"/>
-                        </div>
-                        <div style={{flex:1}}>
-                          <label style={{fontSize:10,color:"#666",marginBottom:4,display:"block"}}>Nome (opcional)</label>
-                          <input value={acaoNome} onChange={e=>setAcaoNome(e.target.value)} placeholder={`Ação ${acaoNumero||activeEvento.acoes.length+1}`}/>
-                        </div>
-                      </div>
-                      <label style={{fontSize:10,color:"#666",marginBottom:4,display:"block"}}>Lista de participantes</label>
-                      <textarea value={acaoTexto} onChange={e=>setAcaoTexto(e.target.value)} placeholder={"Cole a lista:\n1- Nome / @instagram\n2- Nome / @instagram"} style={{minHeight:160,fontFamily:"'Space Mono',monospace",fontSize:11}}/>
-                      <div style={{display:"flex",justifyContent:"flex-end",marginTop:12}}>
-                        <button className="btn btn-accent" onClick={processarAcao}>Processar Ação</button>
-                      </div>
+            {/* IMPORTAR TAB */}
+            {evtTab === "importar" && (
+              <div style={{ maxWidth: 640 }}>
+                {!activeEvento.encerrado && !editingAcaoId && (
+                  <div className="card" style={{ marginBottom: 14 }}>
+                    <div className="ct">📥 Importar Nova Ação</div>
+                    <div style={{ background: "rgba(139,92,246,.06)", border: "1px solid rgba(139,92,246,.15)", borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: "#64748b", lineHeight: 1.7 }}>
+                      <strong style={{ color: "#a78bfa" }}>Parser inteligente:</strong> todo <strong style={{ color: "#34d399" }}>@</strong> = Instagram · antes da <strong style={{ color: "#34d399" }}>/</strong> = nome
                     </div>
-                  )}
-                  {activeEvento.encerrado&&!editingAcaoId&&(
-                    <div className="card" style={{marginBottom:16,textAlign:"center",padding:30}}>
-                      <div style={{fontSize:13,color:"#ff6b6b",marginBottom:4}}>🔒 Evento encerrado</div>
-                      <div style={{fontSize:11,color:"#666"}}>Você ainda pode editar ações existentes abaixo.</div>
+                    <div style={{ display: "flex", gap: 12 }}>
+                      <Field label="Nº Ação" style={{ flex: "0 0 110px" }}><input style={inp} type="number" value={acaoNum} onChange={e => setAcaoNum(e.target.value)} placeholder={`${activeEvento.acoes.length + 1}`} /></Field>
+                      <Field label="Nome (opcional)" style={{ flex: 1 }}><input style={inp} value={acaoNome} onChange={e => setAcaoNome(e.target.value)} placeholder={`Ação ${acaoNum || activeEvento.acoes.length + 1}`} /></Field>
                     </div>
-                  )}
-                  {editingAcaoId&&(()=>{
-                    const ea=activeEvento.acoes.find(a=>a.id===editingAcaoId);
-                    return(
-                      <div className="card" style={{marginBottom:16,border:"1px solid #ffd97a44"}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-                          <div className="section-title" style={{color:"#ffd97a"}}>✏️ Editando Ação {ea?.numero}</div>
-                          <button className="btn btn-ghost" style={{fontSize:11}} onClick={()=>{setEditingAcaoId(null);setEditAcaoTexto("");}}>Cancelar</button>
+                    <Field label="Lista de participantes">
+                      <textarea style={{ ...inp, minHeight: 140, fontFamily: "monospace", fontSize: 13 }} value={acaoTexto} onChange={e => setAcaoTexto(e.target.value)} placeholder={"Cole a lista:\n1- Nome / @instagram\n2- Nome / @instagram"} />
+                    </Field>
+                    <div style={{ display: "flex", justifyContent: "flex-end" }}><button className="btn bp" onClick={processarAcao}>Processar Ação</button></div>
+                  </div>
+                )}
+                {editingAcaoId && (() => {
+                  const ea = activeEvento.acoes.find(a => a.id === editingAcaoId);
+                  return (
+                    <div className="card" style={{ marginBottom: 14, border: "1px solid rgba(251,191,36,.3)" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                        <div className="ct" style={{ color: "#fbbf24", margin: 0 }}>✏️ Editando Ação {ea?.numero}</div>
+                        <button className="btn bg bsm" onClick={() => { setEditingAcaoId(null); setEditAcaoTexto(""); }}>Cancelar</button>
+                      </div>
+                      <textarea style={{ ...inp, minHeight: 140, fontFamily: "monospace", fontSize: 13 }} value={editAcaoTexto} onChange={e => setEditAcaoTexto(e.target.value)} placeholder={"Nova lista:\n1- Nome / @instagram"} />
+                      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}><button className="btn bp" onClick={resubmitAcao}>Reprocessar</button></div>
+                    </div>
+                  );
+                })()}
+                {activeEvento.acoes.length > 0 && (
+                  <div className="card">
+                    <div className="ct">Ações Registradas</div>
+                    {[...activeEvento.acoes].reverse().map(a => {
+                      const s = stats?.acaoStats.find(x => x.id === a.id);
+                      return (
+                        <div key={a.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 0", borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <span style={{ fontFamily: "monospace", fontWeight: 700, color: "#a78bfa", width: 40 }}>#{a.numero}</span>
+                            <span style={{ fontSize: 13 }}>{a.nome}</span>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 12, color: "#64748b" }}>{s?.ok || 0}/{s?.total || 0}</span>
+                            <button className="btn be bsm" onClick={() => limparAcao(a.id)}>✏️</button>
+                            {!activeEvento.encerrado && <button className="btn bd bsm" onClick={() => removerAcao(a.id)}>✕</button>}
+                          </div>
                         </div>
-                        <textarea value={editAcaoTexto} onChange={e=>setEditAcaoTexto(e.target.value)} placeholder={"Nova lista:\n1- Nome / @instagram"} style={{minHeight:160,fontFamily:"'Space Mono',monospace",fontSize:11}}/>
-                        <div style={{display:"flex",justifyContent:"flex-end",marginTop:12}}>
-                          <button className="btn btn-accent" onClick={resubmitAcao}>Reprocessar</button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* DIVULGADORAS TAB */}
+            {evtTab === "divulgadoras" && (
+              <div className="card">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                  <div className="ct" style={{ margin: 0 }}>👥 Divulgadoras ({activeEvento.divulgadoras.length})</div>
+                  <input style={{ ...inp, width: 210 }} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} placeholder="🔍 Buscar..." />
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table className="tbl">
+                    <thead><tr><th>Nome</th><th>Instagram</th><th>Entrou</th><th>OKs</th><th>%</th><th>Ações</th></tr></thead>
+                    <tbody>
+                      {activeEvento.divulgadoras.filter(d => {
+                        if (!searchTerm) return true;
+                        const s = searchTerm.toLowerCase();
+                        return d.nome.toLowerCase().includes(s) || (d.instagram || "").toLowerCase().includes(s);
+                      }).map(d => {
+                        const r = stats?.ranking.find(x => x.id === d.id);
+                        if (editingDiv === d.id) {
+                          return (
+                            <tr key={d.id} style={{ background: "rgba(139,92,246,.06)" }}>
+                              <td><input className="edit-input" value={editDivNome} onChange={e => setEditDivNome(e.target.value)} style={{ ...inp, padding: "6px 10px", fontSize: 13 }} /></td>
+                              <td><input className="edit-input" value={editDivIg} onChange={e => setEditDivIg(e.target.value)} style={{ ...inp, padding: "6px 10px", fontSize: 13 }} /></td>
+                              <td style={{ color: "#64748b", fontSize: 12 }}>Ação {d.entradaAcao}</td>
+                              <td>{r?.ok}/{activeEvento.acoes.length}</td>
+                              <td><span style={{ color: r?.pct === 100 ? "#34d399" : r?.pct >= 75 ? "#fbbf24" : "#f87171", fontWeight: 700 }}>{r?.pct.toFixed(0)}%</span></td>
+                              <td><div style={{ display: "flex", gap: 5 }}>
+                                <button className="btn bs bsm" onClick={() => salvarEditDiv(d.id)}>✓</button>
+                                <button className="btn bg bsm" onClick={() => setEditingDiv(null)}>✕</button>
+                              </div></td>
+                            </tr>
+                          );
+                        }
+                        return (
+                          <tr key={d.id}>
+                            <td style={{ fontWeight: 600 }}>{d.nome}</td>
+                            <td style={{ color: "#a78bfa" }}>{d.instagram ? `@${d.instagram}` : "—"}</td>
+                            <td style={{ color: "#64748b", fontSize: 12 }}>Ação {d.entradaAcao || "?"}</td>
+                            <td>{r?.ok}/{activeEvento.acoes.length}</td>
+                            <td><span style={{ color: r?.pct === 100 ? "#34d399" : r?.pct >= 75 ? "#fbbf24" : "#f87171", fontWeight: 700 }}>{r?.pct.toFixed(0)}%</span></td>
+                            <td><div style={{ display: "flex", gap: 5 }}>
+                              <button className="btn be bsm" onClick={() => { setEditingDiv(d.id); setEditDivNome(d.nome); setEditDivIg(d.instagram || ""); }}>✏️</button>
+                              <button className="btn bd bsm" onClick={() => removerDiv(d.id)}>✕</button>
+                            </div></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* TABELA TAB */}
+            {evtTab === "tabela" && (
+              !stats || !activeEvento.acoes.length ? <div className="empty"><div style={{ fontSize: 48 }}>📋</div><div style={{ marginTop: 8 }}>Tabela vazia</div></div> :
+                <div className="tbl-wrap">
+                  <table className="tbl" style={{ minWidth: 700 }}>
+                    <thead><tr>
+                      <th style={{ position: "sticky", left: 0, background: "#12121f", minWidth: 150 }}>Nome</th>
+                      <th>Instagram</th><th>Entrada</th>
+                      {activeEvento.acoes.map(a => <th key={a.id} style={{ textAlign: "center", minWidth: 44 }}>A{a.numero}</th>)}
+                      <th style={{ textAlign: "center" }}>OK</th><th style={{ textAlign: "center" }}>%</th>
+                    </tr></thead>
+                    <tbody>
+                      {stats.ranking.map(r => (
+                        <tr key={r.id}>
+                          <td style={{ fontWeight: 600, position: "sticky", left: 0, background: "#07070d" }}>{r.nome}</td>
+                          <td style={{ color: "#a78bfa", fontSize: 12 }}>{r.instagram ? `@${r.instagram}` : ""}</td>
+                          <td style={{ fontSize: 11, color: "#64748b" }}>Ação {r.entradaAcao || "?"}</td>
+                          {activeEvento.acoes.map(a => {
+                            const v = activeEvento.marcacoes[`${r.id}_${a.id}`];
+                            return <td key={a.id} className={v === "OK" ? "cell-ok" : "cell-x"}>{v || "—"}</td>;
+                          })}
+                          <td style={{ textAlign: "center", fontWeight: 700, color: "#34d399" }}>{r.ok}</td>
+                          <td style={{ textAlign: "center", fontWeight: 700, color: r.pct === 100 ? "#34d399" : r.pct >= 75 ? "#fbbf24" : "#f87171" }}>{r.pct.toFixed(0)}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+            )}
+
+            {/* METAS TAB */}
+            {evtTab === "metas" && (
+              <div style={{ maxWidth: 500 }}>
+                <div className="card">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                    <div className="ct" style={{ margin: 0 }}>🎯 Metas</div>
+                    <button className="btn be bsm" onClick={() => { setTempMetas([...(activeEvento.metas || []).map(m => ({ ...m })), { label: "", percentual: "" }]); setMetasModal(true); }}>✏️ Editar</button>
+                  </div>
+                  {!activeEvento.metas?.length ? <div style={{ color: "#64748b", fontSize: 13 }}>Nenhuma meta. Clique em Editar.</div> :
+                    activeEvento.metas.sort((a, b) => b.percentual - a.percentual).map((m, i) => {
+                      const qualified = stats?.ranking.filter(r => r.pct >= m.percentual) || [];
+                      return (
+                        <div key={i} style={{ padding: "13px 0", borderBottom: "1px solid rgba(255,255,255,.06)" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                            <span style={{ fontSize: 15, fontWeight: 700 }}>{i === 0 ? "🥇" : i === 1 ? "🥈" : "🥉"} {m.label}</span>
+                            <span className="badge bpu">≥ {m.percentual}%</span>
+                          </div>
+                          <div style={{ fontSize: 12, color: "#34d399", marginBottom: 6 }}>{qualified.length} classificada{qualified.length !== 1 ? "s" : ""}</div>
+                          <div className="prog"><div className="pf" style={{ width: `${m.percentual}%` }} /></div>
                         </div>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+
+            {/* PROMOTERS TAB */}
+            {evtTab === "promoters" && (
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+                  <div style={{ fontSize: 19, fontWeight: 800 }}>🔗 Promoters</div>
+                  <div style={{ display: "flex", gap: 9 }}>
+                    <button className="btn bg bsm" onClick={() => { setCondCat("Divulgadora"); setCondTexto(activeEvento.condicoes?.["Divulgadora"] || ""); setCondModal(true); }}>📋 Condições</button>
+                    <button className="btn bp bsm" onClick={() => { setEditingProm(null); setPNome(""); setPEmail(""); setPLink(""); setPCat("Promoter"); setPromModal(true); }}>+ Novo Promoter</button>
+                  </div>
+                </div>
+                {!(activeEvento.promoters?.length) ? <div className="empty"><div style={{ fontSize: 40, marginBottom: 8 }}>🔗</div><div>Nenhum promoter</div></div> :
+                  (activeEvento.promoters || []).map(p => {
+                    const totalQ = (p.vendas || []).reduce((s, v) => s + v.qtd, 0);
+                    const totalV = (p.vendas || []).reduce((s, v) => s + (v.qtd * v.valor), 0);
+                    const cond = activeEvento.condicoes?.[p.categoria] || "";
+                    return (
+                      <div key={p.id} className="pc">
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+                          <div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 4 }}>
+                              <span style={{ fontSize: 16, fontWeight: 800 }}>{p.nome}</span>
+                              <span className={`badge ${p.categoria === "Bday" ? "by" : p.categoria === "Promoter" ? "bbl" : "bgr"}`}>{p.categoria}</span>
+                            </div>
+                            <div style={{ fontSize: 12, color: "#64748b" }}>{p.email}</div>
+                            <div style={{ fontSize: 12, color: "#8b5cf6", marginTop: 2 }}>{p.link}</div>
+                            {cond && <div style={{ marginTop: 7, fontSize: 12, color: "#fbbf24", background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.15)", borderRadius: 7, padding: "4px 10px", display: "inline-block" }}>📋 {cond.substring(0, 70)}{cond.length > 70 ? "..." : ""}</div>}
+                          </div>
+                          <div style={{ display: "flex", gap: 7 }}>
+                            <button className="btn bg bsm" onClick={() => { setEditingProm(p.id); setPNome(p.nome); setPEmail(p.email); setPLink(p.link); setPCat(p.categoria || "Promoter"); setPromModal(true); }}>✏️</button>
+                            <button className="btn bp bsm" onClick={() => { setVendaPromId(p.id); setEditingVendaId(null); setVQtd(1); setVValor(""); setVComp(""); setVObs(""); setVendaModal(true); }}>+ Venda</button>
+                            <button className="btn bd bsm" onClick={() => removerPromoter(p.id)}>✕</button>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: 22, padding: "13px 0", borderTop: "1px solid rgba(255,255,255,.06)", borderBottom: (p.vendas || []).length > 0 ? "1px solid rgba(255,255,255,.06)" : "none", marginBottom: (p.vendas || []).length > 0 ? 14 : 0 }}>
+                          <div><div style={{ fontSize: 26, fontWeight: 800, color: "#34d399", fontFamily: "monospace" }}>{totalQ}</div><div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 1, marginTop: 2 }}>Ingressos</div></div>
+                          <div><div style={{ fontSize: 20, fontWeight: 800, color: "#fbbf24", fontFamily: "monospace" }}>{fmtCur(totalV)}</div><div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 1, marginTop: 2 }}>Total Vendas</div></div>
+                        </div>
+                        {(p.vendas || []).length > 0 && (
+                          <>
+                            <div className="ct">Vendas</div>
+                            <table className="tbl">
+                              <thead><tr><th>Qtd</th><th>Valor/un</th><th>Total</th><th>Comprovante</th><th>Data</th><th></th></tr></thead>
+                              <tbody>
+                                {p.vendas.map(v => (
+                                  <tr key={v.id}>
+                                    <td><span style={{ color: "#34d399", fontWeight: 700, fontSize: 14 }}>{v.qtd}×</span></td>
+                                    <td style={{ color: "#fbbf24" }}>{fmtCur(v.valor)}</td>
+                                    <td style={{ fontWeight: 700 }}>{fmtCur(v.qtd * v.valor)}</td>
+                                    <td><span style={{ color: "#a78bfa", fontSize: 12 }}>{v.comprovante ? `📎 ${v.comprovante}` : "—"}</span></td>
+                                    <td style={{ color: "#64748b", fontSize: 12 }}>{v.data ? new Date(v.data).toLocaleDateString("pt-BR") : "—"}</td>
+                                    <td><div style={{ display: "flex", gap: 5 }}>
+                                      <button className="btn be bsm" onClick={() => { setVendaPromId(p.id); setEditingVendaId(v.id); setVQtd(v.qtd); setVValor(v.valor); setVComp(v.comprovante || ""); setVObs(v.obs || ""); setVendaModal(true); }}>✏️</button>
+                                      <button className="btn bd bsm" onClick={() => removerVenda(p.id, v.id)}>✕</button>
+                                    </div></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </>
+                        )}
                       </div>
                     );
-                  })()}
-                  {activeEvento.acoes.length>0&&(
-                    <div className="card">
-                      <div style={{fontSize:12,fontWeight:600,color:"#888",marginBottom:12}}>Ações Registradas</div>
-                      {[...activeEvento.acoes].reverse().map(a=>{
-                        const s=stats?.acaoStats.find(x=>x.id===a.id);
-                        return(
-                          <div key={a.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #111"}}>
-                            <div style={{display:"flex",alignItems:"center",gap:10}}>
-                              <span style={{fontFamily:"'Space Mono',monospace",fontWeight:700,color:"#c8a2ff",width:40}}>#{a.numero}</span>
-                              <span style={{fontSize:12}}>{a.nome}</span>
-                            </div>
-                            <div style={{display:"flex",alignItems:"center",gap:6}}>
-                              <span style={{fontSize:11,color:"#888"}}>{s?.ok||0}/{s?.total||0}</span>
-                              <button className="btn btn-ghost" style={{padding:"3px 8px",fontSize:10,color:"#ffd97a",borderColor:"#ffd97a44"}} onClick={()=>limparAcao(a.id)}>✏️</button>
-                              {!activeEvento.encerrado&&<button className="btn btn-danger" style={{padding:"3px 8px",fontSize:10}} onClick={()=>removerAcao(a.id)}>✕</button>}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ── DIVULGADORAS ── */}
-              {evtTab==="divulgadoras"&&(
-                <div className="card">
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:16}}>
-                    <div className="section-title">👥 Divulgadoras ({activeEvento.divulgadoras.length})</div>
-                    <input value={searchTerm} onChange={e=>setSearchTerm(e.target.value)} placeholder="Buscar..." style={{width:200,padding:"6px 12px",fontSize:12}}/>
-                  </div>
-                  {activeEvento.divulgadoras.length===0?(
-                    <div style={{textAlign:"center",padding:40,color:"#444"}}>Importe uma ação para cadastrar</div>
-                  ):(
-                    <div style={{maxHeight:500,overflowY:"auto"}}>
-                      {activeEvento.divulgadoras.filter(d=>{
-                        if(!searchTerm)return true;
-                        const s=searchTerm.toLowerCase();
-                        return d.nome.toLowerCase().includes(s)||(d.instagram||"").toLowerCase().includes(s);
-                      }).map(d=>{
-                        const r=stats?.ranking.find(x=>x.id===d.id);
-                        return(
-                          <div key={d.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #1a1a28"}}>
-                            <div style={{flex:1}}>
-                              <span style={{fontWeight:500,fontSize:12}}>{d.nome}</span>
-                              {d.instagram&&<span style={{color:"#c8a2ff",fontSize:10,marginLeft:8}}>@{d.instagram}</span>}
-                              {d.entradaAcao&&<span style={{color:"#555",fontSize:9,marginLeft:8}}>entrou ação {d.entradaAcao}</span>}
-                            </div>
-                            <div style={{display:"flex",alignItems:"center",gap:8}}>
-                              {r&&<span style={{fontFamily:"'Space Mono',monospace",fontSize:11,color:r.pct===100?"#7affc1":r.pct>=75?"#ffd97a":"#ff8a7a"}}>{r.ok}/{activeEvento.acoes.length} ({r.pct.toFixed(0)}%)</span>}
-                              <button className="btn btn-danger" style={{padding:"3px 8px",fontSize:10}} onClick={()=>removerDiv(d.id)}>✕</button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ── TABELA ── */}
-              {evtTab==="tabela"&&(
-                !stats||!activeEvento.acoes.length?(
-                  <div className="empty-state"><div style={{fontSize:48}}>📋</div><div style={{fontSize:15,fontWeight:600,marginTop:8}}>Tabela vazia</div></div>
-                ):(
-                  <div className="table-wrap">
-                    <table>
-                      <thead><tr>
-                        <th style={{position:"sticky",left:0,zIndex:3,background:"#12121a",minWidth:150}}>Nome</th>
-                        <th style={{minWidth:90}}>Instagram</th>
-                        <th style={{minWidth:60}}>Entrada</th>
-                        {activeEvento.acoes.map(a=><th key={a.id} style={{textAlign:"center",minWidth:44}}>A{a.numero}</th>)}
-                        <th style={{textAlign:"center",minWidth:44}}>OK</th>
-                        <th style={{textAlign:"center",minWidth:44}}>%</th>
-                      </tr></thead>
-                      <tbody>
-                        {stats.ranking.map(r=>(
-                          <tr key={r.id}>
-                            <td style={{fontWeight:500,fontSize:11,position:"sticky",left:0,background:"#0a0a0f"}}>{r.nome}</td>
-                            <td style={{color:"#c8a2ff",fontSize:10}}>{r.instagram?`@${r.instagram}`:""}</td>
-                            <td style={{fontSize:9,color:"#666"}}>Ação {r.entradaAcao||"?"}</td>
-                            {activeEvento.acoes.map(a=>{const v=activeEvento.marcacoes[`${r.id}_${a.id}`]; return<td key={a.id} className={v==="OK"?"cell-ok":"cell-x"}>{v||"-"}</td>;})}
-                            <td style={{textAlign:"center",fontFamily:"'Space Mono',monospace",fontWeight:700,color:"#7affc1"}}>{r.ok}</td>
-                            <td style={{textAlign:"center",fontFamily:"'Space Mono',monospace",fontWeight:700,color:r.pct===100?"#7affc1":r.pct>=75?"#ffd97a":"#ff8a7a"}}>{r.pct.toFixed(0)}%</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )
-              )}
-
-              {/* ── METAS ── */}
-              {evtTab==="metas"&&(
-                <div style={{maxWidth:550}}>
-                  <div className="card">
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-                      <div className="section-title">🎯 Metas de Divulgação</div>
-                      {!editingMetas&&<button className="btn btn-ghost" style={{fontSize:11}} onClick={()=>{setTempMetas([...(activeEvento.metas||[]),{label:"",percentual:""}]);setEditingMetas(true);}}>✏️ Editar</button>}
-                    </div>
-                    {editingMetas?(
-                      <>
-                        {tempMetas.map((m,i)=>(
-                          <div key={i} style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
-                            <input value={m.label} onChange={e=>{const c=[...tempMetas];c[i].label=e.target.value;setTempMetas(c);}} placeholder="Nome da faixa" style={{flex:1}}/>
-                            <input value={m.percentual} onChange={e=>{const c=[...tempMetas];c[i].percentual=e.target.value;setTempMetas(c);}} placeholder="%" style={{width:70,textAlign:"center"}} type="number"/>
-                            {tempMetas.length>1&&<button className="btn btn-danger" style={{padding:"3px 6px",fontSize:10}} onClick={()=>setTempMetas(tempMetas.filter((_,j)=>j!==i))}>✕</button>}
-                          </div>
-                        ))}
-                        <button className="btn btn-ghost" style={{fontSize:11,marginBottom:12}} onClick={()=>setTempMetas([...tempMetas,{label:"",percentual:""}])}>+ Adicionar</button>
-                        <div style={{display:"flex",gap:8}}>
-                          <button className="btn btn-accent" onClick={()=>{
-                            const metas=tempMetas.filter(m=>m.label.trim()&&m.percentual).map(m=>({label:m.label.trim(),percentual:parseFloat(m.percentual)}));
-                            updateEvento({...activeEvento,metas},"Metas atualizadas"); setEditingMetas(false); show("Metas atualizadas!");
-                          }}>Salvar</button>
-                          <button className="btn btn-ghost" onClick={()=>setEditingMetas(false)}>Cancelar</button>
-                        </div>
-                      </>
-                    ):(
-                      !activeEvento.metas?.length?(
-                        <div style={{color:"#555",fontSize:12}}>Nenhuma meta definida. Clique em Editar.</div>
-                      ):(
-                        activeEvento.metas.sort((a,b)=>b.percentual-a.percentual).map((m,i)=>{
-                          const qualified=stats?.ranking.filter(r=>r.pct>=m.percentual)||[];
-                          return(
-                            <div key={i} style={{padding:"12px 0",borderBottom:"1px solid #1a1a28"}}>
-                              <div style={{display:"flex",justifyContent:"space-between"}}>
-                                <span style={{fontSize:13,fontWeight:600}}>{m.label}</span>
-                                <span style={{fontFamily:"'Space Mono',monospace",fontSize:12,color:"#c8a2ff"}}>≥ {m.percentual}%</span>
-                              </div>
-                              <div style={{fontSize:11,color:"#7affc1",marginTop:4}}>{qualified.length} classificada{qualified.length!==1?"s":""}</div>
-                            </div>
-                          );
-                        })
-                      )
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* ── PROMOTERS ── */}
-              {evtTab==="promoters"&&(()=>{
-                const promoters = activeEvento.promoters||[];
-                const condicoes = activeEvento.condicoes||{};
-                return(
-                  <div>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-                      <div style={{fontSize:16,fontWeight:800}}>🔗 Promoters</div>
-                      <div style={{display:"flex",gap:8}}>
-                        <button className="btn btn-ghost" style={{fontSize:11}} onClick={()=>{setCondicoesCat(CATS[0]);setCondicoesTexto(condicoes[CATS[0]]||"");setCondicoesModal(true);}}>📋 Condições de Venda</button>
-                        <button className="btn btn-accent" onClick={()=>{setEditingPromoter(null);setPNome("");setPEmail("");setPLink("");setPCategoria("Promoter");setPromoterModal(true);}}>+ Novo Promoter</button>
-                      </div>
-                    </div>
-                    {promoters.length===0?(
-                      <div className="empty-state"><div style={{fontSize:40,marginBottom:8}}>🔗</div><div>Nenhum promoter cadastrado</div></div>
-                    ):(
-                      <div style={{display:"grid",gap:14}}>
-                        {promoters.map(p=>{
-                          const totalQtd=(p.vendas||[]).reduce((s,v)=>s+v.qtd,0);
-                          const totalVal=(p.vendas||[]).reduce((s,v)=>s+(v.qtd*v.valor),0);
-                          const cond=condicoes[p.categoria]||"";
-                          return(
-                            <div key={p.id} className="card" style={{padding:"16px 18px"}}>
-                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-                                <div>
-                                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
-                                    <span style={{fontWeight:700,fontSize:14}}>{p.nome}</span>
-                                    <span className="badge" style={{background:"#c8a2ff22",color:"#c8a2ff"}}>{p.categoria}</span>
-                                  </div>
-                                  <div style={{fontSize:11,color:"#666"}}>{p.email}</div>
-                                  <div style={{fontSize:11,color:"#7a5af5",marginTop:2,wordBreak:"break-all"}}>{p.link}</div>
-                                  {cond&&<div style={{fontSize:10,color:"#ffd97a",marginTop:4,background:"#ffd97a11",borderRadius:4,padding:"3px 8px",display:"inline-block"}}>📋 {cond.substring(0,60)}{cond.length>60?"...":""}</div>}
-                                </div>
-                                <div style={{display:"flex",gap:6,flexShrink:0}}>
-                                  <button className="btn btn-ghost" style={{padding:"4px 10px",fontSize:10}} onClick={()=>editarPromoter(p)}>✏️</button>
-                                  <button className="btn btn-accent" style={{padding:"4px 10px",fontSize:10}} onClick={()=>{setVendaModal(p.id);setEditingVenda(null);setVQtd(1);setVValor("");setVComprovante("");setVObs("");}}>+ Venda</button>
-                                  <button className="btn btn-danger" style={{padding:"4px 8px",fontSize:10}} onClick={()=>removerPromoter(p.id)}>✕</button>
-                                </div>
-                              </div>
-                              <div style={{display:"flex",gap:16,marginBottom:(p.vendas||[]).length>0?12:0}}>
-                                <div style={{textAlign:"center"}}>
-                                  <div style={{fontFamily:"'Space Mono',monospace",fontSize:20,fontWeight:700,color:"#7affc1"}}>{totalQtd}</div>
-                                  <div style={{fontSize:9,color:"#555",textTransform:"uppercase",letterSpacing:1}}>Ingressos</div>
-                                </div>
-                                <div style={{textAlign:"center"}}>
-                                  <div style={{fontFamily:"'Space Mono',monospace",fontSize:16,fontWeight:700,color:"#ffd97a"}}>{fmtCur(totalVal)}</div>
-                                  <div style={{fontSize:9,color:"#555",textTransform:"uppercase",letterSpacing:1}}>Total Vendas</div>
-                                </div>
-                              </div>
-                              {(p.vendas||[]).length>0&&(
-                                <div style={{borderTop:"1px solid #1a1a28",paddingTop:10}}>
-                                  <div style={{fontSize:10,color:"#888",textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Vendas registradas</div>
-                                  {p.vendas.map((v,vi)=>(
-                                    <div key={v.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 0",borderBottom:"1px solid #111",fontSize:11}}>
-                                      <div>
-                                        <span style={{fontWeight:600,color:"#7affc1"}}>{v.qtd}x</span>
-                                        <span style={{color:"#ffd97a",marginLeft:8}}>{fmtCur(v.valor)}/un</span>
-                                        <span style={{color:"#888",marginLeft:8}}>= {fmtCur(v.qtd*v.valor)}</span>
-                                        {v.obs&&<span style={{color:"#666",marginLeft:8,fontStyle:"italic"}}>{v.obs}</span>}
-                                        {v.comprovante&&<span style={{color:"#c8a2ff",marginLeft:8,fontSize:10}}>📎 comprov.</span>}
-                                      </div>
-                                      <div style={{display:"flex",gap:4,alignItems:"center"}}>
-                                        <span style={{fontSize:9,color:"#444"}}>{new Date(v.data).toLocaleDateString("pt-BR")}</span>
-                                        <button className="btn btn-ghost" style={{padding:"2px 7px",fontSize:10,color:"#ffd97a",borderColor:"#ffd97a33"}} onClick={()=>editarVenda(p.id,v)}>✏️</button>
-                                        <button className="btn btn-danger" style={{padding:"2px 6px",fontSize:10}} onClick={()=>removerVenda(p.id,v.id)}>✕</button>
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              {/* ── LISTA FINAL ── */}
-              {evtTab==="lista"&&(()=>{
-                const report=generateReport(activeEvento);
-                const sorteios=activeEvento.sorteios||[];
-                const promoters=activeEvento.promoters||[];
-                return(
-                  <div>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-                      <div style={{fontSize:16,fontWeight:800}}>🏆 Lista Final — {activeEvento.nome}</div>
-                      <button className="btn btn-accent" style={{fontSize:11}} onClick={()=>exportCSV(activeEvento,activeEvento.encerrado?"final":"parcial")}>
-                        ⬇ Exportar {activeEvento.encerrado?"Final":"Parcial"}
-                      </button>
-                    </div>
-                    {!activeEvento.metas?.length?(
-                      <div className="card" style={{textAlign:"center",padding:32,color:"#555"}}>Defina metas na aba "Metas" primeiro</div>
-                    ):(
-                      report.map((r,i)=>(
-                        <div key={i} className="card" style={{marginBottom:14}}>
-                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,paddingBottom:10,borderBottom:"1px solid #1a1a28"}}>
-                            <span style={{fontWeight:700,fontSize:14}}>{r.meta.label}</span>
-                            <span style={{fontFamily:"'Space Mono',monospace",color:"#c8a2ff",fontSize:12}}>≥ {r.meta.percentual}% — {r.qualified.length} classificadas</span>
-                          </div>
-                          {r.qualified.length===0?(
-                            <div style={{color:"#555",fontSize:11,marginBottom:10}}>Nenhuma atingiu esta meta</div>
-                          ):(
-                            <div style={{marginBottom:12}}>
-                              <div style={{fontSize:10,color:"#7affc1",textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>✅ Classificadas ({r.qualified.length})</div>
-                              {r.qualified.map(q=>(
-                                <div key={q.id} style={{display:"flex",justifyContent:"space-between",padding:"5px 8px",fontSize:11,borderBottom:"1px solid #111"}}>
-                                  <div>
-                                    <span style={{fontWeight:600}}>{q.nome}</span>
-                                    {q.instagram&&<span style={{color:"#c8a2ff",marginLeft:6}}>@{q.instagram}</span>}
-                                    <span style={{color:"#555",marginLeft:8,fontSize:9}}>entrou ação {q.entradaAcao||"?"}</span>
-                                  </div>
-                                  <div style={{display:"flex",gap:10,color:"#888"}}>
-                                    <span>{q.ok}/{activeEvento.acoes.length}</span>
-                                    <span style={{fontWeight:700,color:"#7affc1",fontFamily:"'Space Mono',monospace"}}>{q.pct.toFixed(0)}%</span>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                          {r.notQualified.length>0&&(
-                            <details>
-                              <summary style={{fontSize:10,color:"#ff8a7a",textTransform:"uppercase",letterSpacing:1,cursor:"pointer",userSelect:"none",marginBottom:6}}>❌ Não classificadas ({r.notQualified.length})</summary>
-                              {r.notQualified.map(q=>(
-                                <div key={q.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 8px",fontSize:11,borderBottom:"1px solid #0d0d15"}}>
-                                  <span style={{color:"#888"}}>{q.nome}{q.instagram&&<span style={{color:"#c8a2ff55",marginLeft:6,fontSize:10}}>@{q.instagram}</span>}</span>
-                                  <span style={{fontFamily:"'Space Mono',monospace",fontSize:11,color:"#ff8a7a"}}>{q.pct.toFixed(0)}%</span>
-                                </div>
-                              ))}
-                            </details>
-                          )}
-                        </div>
-                      ))
-                    )}
-                    {sorteios.length>0&&(
-                      <div className="card" style={{marginBottom:14}}>
-                        <div style={{fontSize:13,fontWeight:700,marginBottom:14,paddingBottom:10,borderBottom:"1px solid #1a1a28"}}>🎲 Sorteios</div>
-                        {sorteios.map(s=>(
-                          <div key={s.id} style={{padding:"10px 0",borderBottom:"1px solid #111"}}>
-                            <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                              <div><span style={{fontWeight:700,color:"#ffd97a"}}>{s.titulo}</span><span style={{fontSize:10,color:"#666",marginLeft:10}}>{s.acaoNome}</span></div>
-                              <span style={{fontSize:9,color:"#555"}}>{new Date(s.data).toLocaleString("pt-BR")}</span>
-                            </div>
-                            {s.premio&&<div style={{fontSize:11,color:"#7affc1",marginBottom:4}}>🎁 {s.premio}</div>}
-                            {s.observacao&&<div style={{fontSize:11,color:"#888",marginBottom:4,fontStyle:"italic"}}>{s.observacao}</div>}
-                            {s.vencedoras.map((v,i)=>(
-                              <div key={i} style={{fontSize:12,paddingLeft:8,marginTop:3}}>
-                                <span style={{color:"#ffd97a",fontWeight:700,marginRight:8}}>{i+1}°</span>
-                                {v.nome} {v.instagram&&<span style={{color:"#c8a2ff",fontSize:10}}>@{v.instagram}</span>}
-                              </div>
-                            ))}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {promoters.length>0&&(
-                      <div className="card">
-                        <div style={{fontSize:13,fontWeight:700,marginBottom:14,paddingBottom:10,borderBottom:"1px solid #1a1a28"}}>🔗 Promoters — Resumo de Vendas</div>
-                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-                          <thead><tr>
-                            {["Nome","Categoria","Ingressos","Total R$","Link"].map((h,i)=>(
-                              <th key={i} style={{padding:"6px 10px",textAlign:"left",color:"#666",fontSize:9,textTransform:"uppercase",borderBottom:"1px solid #1a1a28"}}>{h}</th>
-                            ))}
-                          </tr></thead>
-                          <tbody>
-                            {promoters.map(p=>{
-                              const tQ=(p.vendas||[]).reduce((s,v)=>s+v.qtd,0);
-                              const tV=(p.vendas||[]).reduce((s,v)=>s+(v.qtd*v.valor),0);
-                              return(
-                                <tr key={p.id}>
-                                  <td style={{padding:"6px 10px",fontWeight:600}}>{p.nome}</td>
-                                  <td style={{padding:"6px 10px"}}><span className="badge" style={{background:"#c8a2ff22",color:"#c8a2ff"}}>{p.categoria}</span></td>
-                                  <td style={{padding:"6px 10px",color:"#7affc1",fontFamily:"'Space Mono',monospace",fontWeight:700}}>{tQ}</td>
-                                  <td style={{padding:"6px 10px",color:"#ffd97a",fontFamily:"'Space Mono',monospace"}}>{fmtCur(tV)}</td>
-                                  <td style={{padding:"6px 10px",color:"#7a5af5",fontSize:10,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.link}</td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
-        )}
-
-        {/* ══ SORTEIO GLOBAL ══ */}
-        {view===VIEWS.SORTEIO&&(
-          <div style={{animation:"fadeIn .3s"}}>
-            <div style={{fontSize:22,fontWeight:800,marginBottom:4}}>🎲 Sorteio</div>
-            <div style={{fontSize:12,color:"#555",marginBottom:24}}>Selecione o evento e a ação base</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:24,maxWidth:900}}>
-              <div>
-                <div className="card">
-                  <div className="section-title" style={{marginBottom:14}}>⚙️ Configuração</div>
-                  <div style={{marginBottom:10}}>
-                    <label style={{fontSize:10,color:"#666",marginBottom:4,display:"block"}}>Evento *</label>
-                    <select value={sorteioEventoId} onChange={e=>{setSorteioEventoId(e.target.value);setSorteioAcao("");setSorteioResult(null);}} style={{background:"#0a0a12",border:"1px solid #1e1e2e",borderRadius:8,padding:"10px 14px",color:"#e0e0e0",fontSize:13,width:"100%"}}>
-                      <option value="">Selecione o evento...</option>
-                      {data.eventos.map(e=><option key={e.id} value={e.id}>{e.nome}{e.encerrado?" (encerrado)":""}</option>)}
-                    </select>
-                  </div>
-                  {sorteioEvento&&sorteioEvento.acoes.length>0&&(
-                    <div style={{marginBottom:10}}>
-                      <label style={{fontSize:10,color:"#666",marginBottom:4,display:"block"}}>Ação base *</label>
-                      <select value={sorteioAcao} onChange={e=>{setSorteioAcao(e.target.value);setSorteioResult(null);}} style={{background:"#0a0a12",border:"1px solid #1e1e2e",borderRadius:8,padding:"10px 14px",color:"#e0e0e0",fontSize:13,width:"100%"}}>
-                        <option value="">Selecione a ação...</option>
-                        {sorteioEvento.acoes.map(a=><option key={a.id} value={a.id}>Ação {a.numero}{a.nome!==`Ação ${a.numero}`?` — ${a.nome}`:""}</option>)}
-                      </select>
-                    </div>
-                  )}
-                  {sorteioAcao&&<div style={{fontSize:11,color:"#888",marginBottom:10,padding:"6px 10px",background:"#0a0a16",borderRadius:6}}>{participantesDaAcaoSorteio.length} participante(s) disponíveis</div>}
-                  <div style={{marginBottom:10}}>
-                    <label style={{fontSize:10,color:"#666",marginBottom:4,display:"block"}}>Título do Sorteio *</label>
-                    <input value={sorteioTitulo} onChange={e=>setSorteioTitulo(e.target.value)} placeholder="Ex: Sorteio #1 — Ingresso VIP"/>
-                  </div>
-                  <div style={{marginBottom:10}}>
-                    <label style={{fontSize:10,color:"#666",marginBottom:4,display:"block"}}>🎁 O que o ganhador irá ganhar *</label>
-                    <input value={sортeioPremio} onChange={e=>setSorteioPremio(e.target.value)} placeholder="Ex: 2 ingressos VIP + open bar"/>
-                  </div>
-                  <div style={{marginBottom:10}}>
-                    <label style={{fontSize:10,color:"#666",marginBottom:4,display:"block"}}>Observação (opcional)</label>
-                    <input value={sorteioObs} onChange={e=>setSorteioObs(e.target.value)} placeholder="Ex: Retirar na entrada até 22h"/>
-                  </div>
-                  <div style={{marginBottom:14}}>
-                    <label style={{fontSize:10,color:"#666",marginBottom:4,display:"block"}}>Quantidade de vencedoras</label>
-                    <input type="number" min="1" value={sorteioQtd} onChange={e=>setSorteioQtd(e.target.value)} style={{textAlign:"center"}}/>
-                  </div>
-                  <button className="btn btn-accent" style={{width:"100%",padding:14,fontSize:14}} onClick={realizarSorteio} disabled={sorteioAnimating||!sorteioAcao||!sorteioTitulo.trim()}>
-                    {sorteioAnimating?"🎲 Sorteando...":"🎲 Realizar Sorteio"}
-                  </button>
-                </div>
+                  })}
               </div>
-              <div>
-                <div className="card" style={{minHeight:220}}>
-                  {sorteioAnimating&&(
-                    <div style={{textAlign:"center",padding:"16px 0"}}>
-                      <div style={{fontSize:76,lineHeight:1,display:"inline-block",animation:"diceSpin .18s linear infinite"}}>{diceFace}</div>
-                      <div style={{fontSize:10,color:"#888",textTransform:"uppercase",letterSpacing:2,marginTop:10,marginBottom:6}}>Sorteando...</div>
-                      <div style={{fontSize:17,fontWeight:700,color:"#ffd97a",fontFamily:"'Space Mono',monospace",animation:"pulse .3s infinite"}}>{sorteioAnimName}</div>
-                    </div>
-                  )}
-                  {!sorteioAnimating&&!sorteioResult&&(
-                    <div className="empty-state" style={{padding:"36px 20px"}}><div style={{fontSize:48,marginBottom:8}}>🎰</div><div style={{fontSize:12,color:"#444"}}>Configure e clique em Realizar Sorteio</div></div>
-                  )}
-                  {sorteioResult&&!sorteioAnimating&&(
-                    <div>
-                      <div style={{fontSize:11,color:"#7affc1",textTransform:"uppercase",letterSpacing:2,marginBottom:14,textAlign:"center"}}>🎉 {sorteioResult.length>1?"Vencedoras":"Vencedora"}</div>
-                      {sorteioResult.map((w,i)=>(
-                        <div key={w.id} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 0",borderBottom:i<sorteioResult.length-1?"1px solid #1a1a28":"none"}}>
-                          <div style={{fontFamily:"'Space Mono',monospace",fontSize:18,fontWeight:700,color:"#ffd97a",width:34,textAlign:"center"}}>{i+1}°</div>
-                          <div><div style={{fontSize:15,fontWeight:700}}>{w.nome}</div>{w.instagram&&<div style={{color:"#c8a2ff",fontSize:12}}>@{w.instagram}</div>}</div>
+            )}
+
+            {/* LISTA FINAL TAB */}
+            {evtTab === "lista" && (() => {
+              const report = generateReport(activeEvento);
+              return (
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+                    <div style={{ fontSize: 19, fontWeight: 800 }}>🏆 Lista Final</div>
+                    <button className="btn bp bsm" onClick={() => exportCSV(activeEvento, activeEvento.encerrado ? "final" : "parcial")}>⬇ Exportar {activeEvento.encerrado ? "Final" : "Parcial"}</button>
+                  </div>
+                  {!activeEvento.metas?.length ? <div className="card" style={{ textAlign: "center", padding: 32, color: "#64748b" }}>Defina metas primeiro</div> :
+                    report.map((r, i) => (
+                      <div key={i} className="card" style={{ marginBottom: 14 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid rgba(255,255,255,.06)" }}>
+                          <span style={{ fontSize: 16, fontWeight: 800 }}>{r.meta.label}</span>
+                          <span style={{ color: "#a78bfa", fontFamily: "monospace", fontSize: 13 }}>≥ {r.meta.percentual}% — {r.qualified.length} classificadas</span>
+                        </div>
+                        {r.qualified.length === 0 ? <div style={{ color: "#64748b", fontSize: 12 }}>Nenhuma atingiu esta meta</div> : (
+                          <div style={{ marginBottom: 12 }}>
+                            <div style={{ fontSize: 11, color: "#34d399", fontWeight: 700, marginBottom: 8 }}>✅ Classificadas ({r.qualified.length})</div>
+                            {r.qualified.map(q => (
+                              <div key={q.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 8px", fontSize: 13, borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                                <div><strong>{q.nome}</strong>{q.instagram && <span style={{ color: "#a78bfa", marginLeft: 6 }}>@{q.instagram}</span>}</div>
+                                <div style={{ display: "flex", gap: 10 }}>
+                                  <span style={{ color: "#64748b" }}>{q.ok}/{activeEvento.acoes.length}</span>
+                                  <span style={{ fontWeight: 700, color: "#34d399" }}>{q.pct.toFixed(0)}%</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {r.notQualified.length > 0 && (
+                          <details>
+                            <summary style={{ fontSize: 11, color: "#f87171", textTransform: "uppercase", letterSpacing: 1, cursor: "pointer", userSelect: "none", marginBottom: 6 }}>❌ Não classificadas ({r.notQualified.length})</summary>
+                            {r.notQualified.map(q => (
+                              <div key={q.id} style={{ display: "flex", justifyContent: "space-between", padding: "4px 8px", fontSize: 12 }}>
+                                <span style={{ color: "#64748b" }}>{q.nome}</span>
+                                <span style={{ color: "#f87171" }}>{q.pct.toFixed(0)}%</span>
+                              </div>
+                            ))}
+                          </details>
+                        )}
+                      </div>
+                    ))}
+                  {/* Sorteios */}
+                  {(activeEvento.sorteios || []).length > 0 && (
+                    <div className="card">
+                      <div className="ct">🎲 Sorteios</div>
+                      {activeEvento.sorteios.map(s => (
+                        <div key={s.id} style={{ padding: "11px 0", borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <span style={{ fontWeight: 700, color: "#fbbf24" }}>{s.titulo}</span>
+                            <span style={{ fontSize: 11, color: "#64748b" }}>{s.data ? new Date(s.data).toLocaleDateString("pt-BR") : ""}</span>
+                          </div>
+                          {s.premio && <div style={{ fontSize: 12, color: "#34d399", marginBottom: 3 }}>🎁 {s.premio}</div>}
+                          {s.vencedoras.map((v, i) => <div key={i} style={{ fontSize: 13, paddingLeft: 8, marginTop: 3 }}><span style={{ color: "#fbbf24", fontWeight: 700, marginRight: 8 }}>{i + 1}°</span>{v.nome}{v.instagram && <span style={{ color: "#a78bfa", fontSize: 11 }}> @{v.instagram}</span>}</div>)}
                         </div>
                       ))}
                     </div>
                   )}
-                </div>
-              </div>
-            </div>
-            {data.eventos.some(e=>e.sorteios?.length>0)&&(
-              <div className="card" style={{maxWidth:900,marginTop:16}}>
-                <div className="section-title" style={{marginBottom:14}}>📜 Histórico de Sorteios</div>
-                {data.eventos.flatMap(e=>(e.sorteios||[]).map(s=>({...s,evtNome:e.nome,evtId:e.id}))).sort((a,b)=>new Date(b.data)-new Date(a.data)).map(s=>(
-                  <div key={s.id} style={{padding:"12px 0",borderBottom:"1px solid #1a1a28"}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
-                      <div><span style={{fontWeight:700,color:"#ffd97a"}}>{s.titulo}</span><span style={{fontSize:10,color:"#888",marginLeft:10}}>{s.evtNome} · {s.acaoNome}</span></div>
-                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                        <span style={{fontSize:9,color:"#555"}}>{new Date(s.data).toLocaleString("pt-BR")}</span>
-                        <button className="btn btn-danger" style={{padding:"2px 7px",fontSize:10}} onClick={()=>removerSorteio(s.evtId,s.id)}>✕</button>
-                      </div>
+                  {/* Promoters resumo */}
+                  {(activeEvento.promoters || []).length > 0 && (
+                    <div className="card">
+                      <div className="ct">🔗 Promoters — Resumo</div>
+                      <table className="tbl">
+                        <thead><tr><th>Nome</th><th>Categoria</th><th>Ingressos</th><th>Total R$</th></tr></thead>
+                        <tbody>
+                          {activeEvento.promoters.map(p => {
+                            const tQ = (p.vendas || []).reduce((s, v) => s + v.qtd, 0), tV = (p.vendas || []).reduce((s, v) => s + (v.qtd * v.valor), 0);
+                            return <tr key={p.id}><td style={{ fontWeight: 600 }}>{p.nome}</td><td><span className={`badge ${p.categoria === "Bday" ? "by" : "bbl"}`}>{p.categoria}</span></td><td style={{ color: "#34d399", fontWeight: 700 }}>{tQ}</td><td style={{ color: "#fbbf24" }}>{fmtCur(tV)}</td></tr>;
+                          })}
+                        </tbody>
+                      </table>
                     </div>
-                    {s.premio&&<div style={{fontSize:11,color:"#7affc1",marginBottom:3}}>🎁 {s.premio}</div>}
-                    {s.observacao&&<div style={{fontSize:11,color:"#888",marginBottom:3,fontStyle:"italic"}}>{s.observacao}</div>}
-                    {s.vencedoras.map((v,i)=>(
-                      <div key={i} style={{fontSize:11,paddingLeft:8,marginTop:3}}>
-                        <span style={{color:"#ffd97a",fontWeight:700,marginRight:6}}>{i+1}°</span>
-                        {v.nome} {v.instagram&&<span style={{color:"#c8a2ff"}}>@{v.instagram}</span>}
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* ══ SORTEIO ══ */}
+        {view === VIEWS.SORTEIO && (
+          <div className="page-in">
+            <div className="ph"><div><div className="ph-t">🎲 Sorteio</div><div className="ph-s">Selecione o evento e ação base</div></div></div>
+            <div className="g2" style={{ maxWidth: 860 }}>
+              <div className="card">
+                <div className="ct">⚙️ Configuração</div>
+                <Field label="Evento *"><select style={inp} value={sortEventoId} onChange={e => { setSortEventoId(e.target.value); setSortAcao(""); setSortResult(null); }}>
+                  <option value="">Selecione...</option>
+                  {data.eventos.map(e => <option key={e.id} value={e.id}>{e.nome}</option>)}
+                </select></Field>
+                {sortEvento?.acoes.length > 0 && <Field label="Ação base *"><select style={inp} value={sortAcao} onChange={e => { setSortAcao(e.target.value); setSortResult(null); }}>
+                  <option value="">Selecione...</option>
+                  {sortEvento.acoes.map(a => <option key={a.id} value={a.id}>Ação {a.numero}{a.nome !== `Ação ${a.numero}` ? ` — ${a.nome}` : ""}</option>)}
+                </select></Field>}
+                {sortAcao && <div style={{ background: "rgba(139,92,246,.06)", border: "1px solid rgba(139,92,246,.15)", borderRadius: 9, padding: "9px 13px", fontSize: 13, color: "#64748b", marginBottom: 13 }}>🟢 {sortParticipantes.length} participante(s)</div>}
+                <Field label="Título *"><input style={inp} value={sortTitulo} onChange={e => setSortTitulo(e.target.value)} placeholder="Ex: Sorteio #1 — VIP" /></Field>
+                <Field label="🎁 O que o ganhador irá ganhar *"><input style={inp} value={sortPremio} onChange={e => setSortPremio(e.target.value)} placeholder="Ex: 2 ingressos VIP + open bar" /></Field>
+                <Field label="Observação"><input style={inp} value={sortObs} onChange={e => setSortObs(e.target.value)} placeholder="Ex: Retirar até 22h" /></Field>
+                <Field label="Qtd vencedoras"><input style={{ ...inp, maxWidth: 110, textAlign: "center" }} type="number" value={sortQtd} onChange={e => setSortQtd(e.target.value)} min="1" /></Field>
+                <button className="btn bp" style={{ width: "100%", justifyContent: "center", padding: "13px", fontSize: 15 }} id="btnSort" onClick={realizarSorteio} disabled={sortAnimating || !sortAcao || !sortTitulo.trim()}>
+                  {sortAnimating ? "🎲 Sorteando..." : "🎲 Realizar Sorteio"}
+                </button>
+              </div>
+              <div>
+                <div className="card" style={{ textAlign: "center", minHeight: 200, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                  {!sortAnimating && !sortResult && <div><div style={{ fontSize: 52, marginBottom: 12 }}>🎰</div><div style={{ color: "#64748b" }}>Configure e clique em Realizar Sorteio</div></div>}
+                  {sortAnimating && (
+                    <div style={{ padding: "14px 0" }}>
+                      <div style={{ fontSize: 76, display: "inline-block", animation: "spin .18s linear infinite" }}>{diceFace}</div>
+                      <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: 3, margin: "12px 0 7px" }}>Sorteando...</div>
+                      <div style={{ fontSize: 19, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", animation: "pulse .3s infinite" }}>{sortAnimName}</div>
+                    </div>
+                  )}
+                  {sortResult && !sortAnimating && (
+                    <div style={{ padding: "14px" }}>
+                      <div style={{ fontSize: 12, color: "#34d399", textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>🎉 Vencedora!</div>
+                      {sortResult.map((w, i) => (
+                        <div key={w.id} style={{ display: "inline-flex", alignItems: "center", gap: 14, background: "rgba(139,92,246,.1)", border: "1px solid rgba(139,92,246,.2)", borderRadius: 14, padding: "14px 22px", marginBottom: 8 }}>
+                          <div style={{ fontSize: 26, fontWeight: 800, color: "#fbbf24" }}>{i + 1}°</div>
+                          <div style={{ textAlign: "left" }}><div style={{ fontSize: 19, fontWeight: 800 }}>{w.nome}</div>{w.instagram && <div style={{ color: "#a78bfa", fontSize: 13 }}>@{w.instagram}</div>}</div>
+                        </div>
+                      ))}
+                      {sortPremio && <div style={{ marginTop: 12, fontSize: 13, color: "#34d399" }}>🎁 {sortPremio}</div>}
+                    </div>
+                  )}
+                </div>
+                {data.eventos.some(e => e.sorteios?.length > 0) && (
+                  <div className="card">
+                    <div className="ct">📜 Histórico</div>
+                    {data.eventos.flatMap(e => (e.sorteios || []).map(s => ({ ...s, evtNome: e.nome, evtId: e.id }))).sort((a, b) => new Date(b.data) - new Date(a.data)).slice(0, 10).map(s => (
+                      <div key={s.id} style={{ padding: "11px 0", borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                          <span style={{ fontWeight: 700, color: "#fbbf24", fontSize: 13 }}>{s.titulo}</span>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            <span style={{ fontSize: 11, color: "#64748b" }}>{s.data ? new Date(s.data).toLocaleDateString("pt-BR") : ""}</span>
+                            <button className="btn bd bsm" onClick={() => removerSorteio(s.evtId, s.id)} style={{ padding: "2px 7px" }}>✕</button>
+                          </div>
+                        </div>
+                        {s.premio && <div style={{ fontSize: 12, color: "#34d399", marginBottom: 2 }}>🎁 {s.premio}</div>}
+                        <div style={{ fontSize: 11, color: "#64748b" }}>{s.evtNome}</div>
+                        {s.vencedoras.map((v, i) => <div key={i} style={{ fontSize: 12, paddingLeft: 8, marginTop: 2 }}><span style={{ color: "#fbbf24", fontWeight: 700, marginRight: 6 }}>{i + 1}°</span>{v.nome}</div>)}
                       </div>
                     ))}
                   </div>
-                ))}
+                )}
               </div>
-            )}
+            </div>
           </div>
         )}
 
         {/* ══ ESTATÍSTICAS ══ */}
-        {view===VIEWS.ESTATISTICAS&&(
-          <div style={{animation:"fadeIn .3s"}}>
-            <div style={{fontSize:22,fontWeight:800,marginBottom:4}}>📈 Estatísticas</div>
-            <div style={{fontSize:12,color:"#555",marginBottom:24}}>Análise comparativa entre eventos</div>
-            {data.eventos.length===0?(
-              <div className="empty-state"><div style={{fontSize:48}}>📈</div><div style={{fontSize:15,fontWeight:600,marginTop:8}}>Nenhum evento</div></div>
-            ):(
-              <>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:24}}>
-                  {[
-                    {n:data.eventos.length,l:"Eventos",c:"#c8a2ff"},
-                    {n:data.eventos.reduce((s,e)=>s+e.divulgadoras.length,0),l:"Divulgadoras",c:"#7affc1"},
-                    {n:data.eventos.reduce((s,e)=>s+e.acoes.length,0),l:"Ações",c:"#ffd97a"},
-                    {n:data.eventos.reduce((s,e)=>s+(e.promoters||[]).reduce((s2,p)=>(p.vendas||[]).reduce((s3,v)=>s3+v.qtd,0)+s2,0),0),l:"Ingressos Vendidos",c:"#ff8a7a"},
-                  ].map((st,i)=>(
-                    <div key={i} className="stat-card"><div className="stat-num" style={{color:st.c}}>{st.n}</div><div className="stat-label">{st.l}</div></div>
-                  ))}
-                </div>
-                <div className="card" style={{marginBottom:16}}>
-                  <div className="section-title" style={{marginBottom:4}}>📊 Ativas por Ação — por Evento</div>
-                  <div style={{fontSize:11,color:"#555",marginBottom:16}}>OKs por ação dentro de cada evento</div>
-                  {data.eventos.filter(e=>e.acoes.length>0).map(evt=>{
-                    const s=calcStats(evt); if(!s) return null;
-                    const mediaAtivas=s.acaoStats.length?s.acaoStats.reduce((sum,a)=>sum+a.ok,0)/s.acaoStats.length:0;
-                    return(
-                      <div key={evt.id} style={{marginBottom:20}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                          <span style={{fontWeight:700,fontSize:13}}>{evt.nome}{evt.encerrado&&<span className="badge" style={{background:"#ff6b6b22",color:"#ff6b6b",fontSize:9,marginLeft:8}}>ENC.</span>}</span>
-                          <span style={{fontFamily:"'Space Mono',monospace",color:"#7affc1",fontSize:12}}>Média: {mediaAtivas.toFixed(1)} ativas/ação</span>
+        {view === VIEWS.STATS && (
+          <div className="page-in">
+            <div className="ph"><div><div className="ph-t">📈 Estatísticas</div><div className="ph-s">Comparativo entre eventos</div></div></div>
+            <div className="sg">
+              {[{ n: data.eventos.length, l: "Eventos", c: "#a78bfa", ic: "🎪" }, { n: data.eventos.reduce((s, e) => s + e.divulgadoras.length, 0), l: "Divulgadoras", c: "#34d399", ic: "👩‍💼" }, { n: data.eventos.reduce((s, e) => s + e.acoes.length, 0), l: "Ações", c: "#fbbf24", ic: "⚡" }, { n: data.eventos.reduce((s, e) => s + (e.promoters || []).reduce((s2, p) => s2 + (p.vendas || []).reduce((s3, v) => s3 + v.qtd, 0), 0), 0), l: "Ingressos", c: "#f87171", ic: "🎟️" }].map((st, i) => (
+                <div key={i} className="sc" style={{ borderTop: `3px solid ${st.c}` }}><span className="sc-ic">{st.ic}</span><div className="sc-n" style={{ color: st.c }}>{st.n}</div><div className="sc-l">{st.l}</div></div>
+              ))}
+            </div>
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="ct">📊 Ativas por Ação — por Evento</div>
+              {data.eventos.filter(e => e.acoes.length > 0).map(evt => {
+                const s = calcStats(evt); if (!s) return null;
+                const mediaAtivas = s.acaoStats.length ? s.acaoStats.reduce((sum, a) => sum + a.ok, 0) / s.acaoStats.length : 0;
+                return (
+                  <div key={evt.id} style={{ marginBottom: 20 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 13 }}>
+                      <span style={{ fontWeight: 700 }}>{evt.nome}</span>
+                      <span style={{ color: "#34d399", fontFamily: "monospace" }}>Média: {mediaAtivas.toFixed(1)}/ação</span>
+                    </div>
+                    {s.acaoStats.map(a => (
+                      <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 5 }}>
+                        <span style={{ fontSize: 11, color: "#64748b", width: 56, textAlign: "right", flexShrink: 0 }}>Ação {a.numero}</span>
+                        <div style={{ flex: 1, height: 20, background: "#0d0d18", borderRadius: 5, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${(a.ok / Math.max(evt.divulgadoras.length, 1)) * 100}%`, background: "linear-gradient(90deg,#a78bfa,#7c3aed)", borderRadius: 5 }} />
                         </div>
-                        {s.acaoStats.map(a=>(
-                          <div key={a.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                            <span style={{fontSize:10,color:"#666",width:52,textAlign:"right",flexShrink:0}}>Ação {a.numero}</span>
-                            <div style={{flex:1,height:18,background:"#0d0d18",borderRadius:4,overflow:"hidden"}}>
-                              <div style={{height:"100%",width:`${(a.ok/Math.max(evt.divulgadoras.length,1))*100}%`,background:"linear-gradient(90deg,#c8a2ff,#7a5af5)",borderRadius:4,transition:"width .4s"}}/>
-                            </div>
-                            <span style={{fontSize:10,fontFamily:"'Space Mono',monospace",color:"#888",width:28,flexShrink:0}}>{a.ok}</span>
-                          </div>
-                        ))}
-                        <div style={{fontSize:10,color:"#444",marginTop:4}}>{evt.divulgadoras.length} divulg. · {evt.acoes.length} ações · média: {s.avg.toFixed(1)}% · 100%: {s.topCount}</div>
+                        <span style={{ fontSize: 11, fontFamily: "monospace", color: "#64748b", width: 30, flexShrink: 0 }}>{a.ok}</span>
                       </div>
-                    );
-                  })}
-                </div>
-                <div className="card">
-                  <div className="section-title" style={{marginBottom:4}}>🔀 Comparativo entre Eventos</div>
-                  <div style={{fontSize:11,color:"#555",marginBottom:16}}>Médias gerais lado a lado</div>
-                  {data.eventos.filter(e=>e.acoes.length>0).map(evt=>{
-                    const s=calcStats(evt); if(!s) return null;
-                    const mediaAtivas=s.acaoStats.length?s.acaoStats.reduce((sum,a)=>sum+a.ok,0)/s.acaoStats.length:0;
-                    const totalIngressos=(evt.promoters||[]).reduce((sum,p)=>(p.vendas||[]).reduce((s2,v)=>s2+v.qtd,0)+sum,0);
-                    return(
-                      <div key={evt.id} style={{marginBottom:18}}>
-                        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:5}}>
-                          <span style={{fontWeight:700}}>{evt.nome}</span>
-                          <span style={{fontFamily:"'Space Mono',monospace",color:"#ffd97a"}}>{s.avg.toFixed(1)}% média</span>
-                        </div>
-                        <div className="prog-bar" style={{height:24,borderRadius:6}}>
-                          <div className="prog-fill" style={{width:`${s.avg}%`,height:"100%",borderRadius:6,display:"flex",alignItems:"center",paddingLeft:8}}>
-                            {s.avg>8&&<span style={{fontSize:10,color:"rgba(0,0,0,.7)",fontWeight:700,fontFamily:"'Space Mono',monospace"}}>{s.avg.toFixed(0)}%</span>}
-                          </div>
-                        </div>
-                        <div style={{display:"flex",gap:14,marginTop:5,fontSize:10,color:"#555"}}>
-                          <span>👥 {evt.divulgadoras.length}</span>
-                          <span>⚡ {evt.acoes.length}</span>
-                          <span>✅ {mediaAtivas.toFixed(1)}/ação</span>
-                          <span>🏆 {s.topCount} 100%</span>
-                          <span>🎟️ {totalIngressos} ingr.</span>
-                        </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="card">
+              <div className="ct">🔀 Comparativo de Médias</div>
+              {data.eventos.filter(e => e.acoes.length > 0).map(evt => {
+                const s = calcStats(evt); if (!s) return null;
+                const mediaAtivas = s.acaoStats.length ? s.acaoStats.reduce((sum, a) => sum + a.ok, 0) / s.acaoStats.length : 0;
+                return (
+                  <div key={evt.id} style={{ marginBottom: 18 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 6 }}>
+                      <span style={{ fontWeight: 700 }}>{evt.nome}</span>
+                      <span style={{ fontFamily: "monospace", color: "#fbbf24" }}>{s.avg.toFixed(1)}%</span>
+                    </div>
+                    <div style={{ height: 26, background: "#1a1a2e", borderRadius: 7, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${s.avg}%`, background: "linear-gradient(90deg,#a78bfa,#34d399)", borderRadius: 7, display: "flex", alignItems: "center", paddingLeft: 10 }}>
+                        {s.avg > 8 && <span style={{ fontSize: 11, fontWeight: 700, color: "rgba(0,0,0,.7)" }}>{s.avg.toFixed(0)}%</span>}
                       </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
+                    </div>
+                    <div style={{ display: "flex", gap: 14, fontSize: 12, color: "#64748b", marginTop: 6 }}>
+                      <span>👥 {evt.divulgadoras.length}</span><span>⚡ {evt.acoes.length}</span><span>✅ {mediaAtivas.toFixed(1)}/ação</span><span>🏆 {s.topCount} 100%</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
-        {/* ══ RELATÓRIOS GERAIS ══ */}
-        {view===VIEWS.RELATORIOS&&(
-          <div style={{animation:"fadeIn .3s"}}>
-            <div style={{fontSize:22,fontWeight:800,marginBottom:4}}>📑 Relatórios Gerais</div>
-            <div style={{fontSize:12,color:"#555",marginBottom:24}}>Exportação em CSV de todas as informações por evento</div>
-            <div className="card" style={{maxWidth:700,marginBottom:16}}>
-              <div className="section-title" style={{marginBottom:14}}>⬇ Exportação Geral</div>
-              <div style={{marginBottom:14,padding:"12px 14px",background:"#0a0a16",borderRadius:8,fontSize:12,color:"#888",lineHeight:1.7}}>
-                O relatório geral inclui: <strong style={{color:"#c8a2ff"}}>ranking de divulgadoras</strong> · <strong style={{color:"#7affc1"}}>sorteios com prêmios</strong> · <strong style={{color:"#ffd97a"}}>promoters e vendas detalhadas</strong> · de todos os eventos em um único arquivo CSV.
-              </div>
-              <button className="btn btn-accent" style={{width:"100%",padding:14,fontSize:14}} onClick={exportGeralCSV}>
-                📑 Exportar Relatório Geral (todos os eventos)
-              </button>
+        {/* ══ RELATÓRIOS ══ */}
+        {view === VIEWS.RELATORIOS && (
+          <div className="page-in">
+            <div className="ph"><div><div className="ph-t">📑 Relatórios</div><div className="ph-s">Exportação completa em CSV</div></div></div>
+            <div className="card" style={{ maxWidth: 660, marginBottom: 16 }}>
+              <div className="ct">⬇ Exportação Geral</div>
+              <button className="btn bp" style={{ width: "100%", justifyContent: "center", padding: 14, fontSize: 15 }} onClick={exportGeral}>📑 Exportar Todos os Eventos</button>
             </div>
-            <div className="section-title" style={{marginBottom:14}}>📋 Por Evento</div>
-            {data.eventos.length===0?(
-              <div className="empty-state"><div style={{fontSize:40}}>📑</div><div style={{marginTop:8}}>Nenhum evento cadastrado</div></div>
-            ):(
-              <div style={{display:"grid",gap:12,maxWidth:700}}>
-                {data.eventos.map(evt=>{
-                  const s=calcStats(evt);
-                  return(
-                    <div key={evt.id} className="card" style={{padding:"16px 20px"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                        <div>
-                          <span style={{fontWeight:700,fontSize:14}}>{evt.nome}</span>
-                          {evt.encerrado&&<span className="badge" style={{background:"#ff6b6b22",color:"#ff6b6b",fontSize:9,marginLeft:8}}>ENCERRADO</span>}
-                          {evt.dataEvento&&<div style={{fontSize:11,color:"#555",marginTop:2}}>📅 {evt.dataEvento}</div>}
-                        </div>
-                        <div style={{display:"flex",gap:8}}>
-                          <button className="btn btn-ghost" style={{fontSize:11}} onClick={()=>exportCSV(evt,"parcial")}>📊 Parcial</button>
-                          <button className="btn" style={{fontSize:11,background:evt.encerrado?"#7affc122":"#1a1a28",color:evt.encerrado?"#7affc1":"#444",border:"none",borderRadius:8,padding:"8px 14px",fontFamily:"inherit",fontWeight:600,cursor:evt.encerrado?"pointer":"not-allowed"}}
-                            onClick={()=>{if(evt.encerrado) exportCSV(evt,"final");}}>
-                            🏆 Final
-                          </button>
-                        </div>
-                      </div>
-                      <div style={{display:"flex",gap:14,fontSize:11,color:"#666"}}>
-                        <span>{evt.divulgadoras.length} divulg.</span>
-                        <span>{evt.acoes.length} ações</span>
-                        <span>{(evt.promoters||[]).length} promoters</span>
-                        <span>{evt.sorteios?.length||0} sorteios</span>
-                        {s&&<span>Média: {s.avg.toFixed(0)}%</span>}
-                      </div>
+            <div className="ct">Por Evento</div>
+            {data.eventos.map(evt => {
+              const s = calcStats(evt);
+              return (
+                <div key={evt.id} className="card" style={{ maxWidth: 660, marginBottom: 10, padding: "16px 20px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div>
+                      <div style={{ fontSize: 15, fontWeight: 700 }}>{evt.nome}{evt.encerrado && <span className="badge br" style={{ fontSize: 9, marginLeft: 8 }}>ENC.</span>}</div>
+                      <div style={{ fontSize: 12, color: "#64748b", marginTop: 3 }}>{evt.divulgadoras.length} divulg. · {evt.acoes.length} ações · {(evt.promoters || []).length} promoters · {evt.sorteios?.length || 0} sorteios{s ? ` · ${s.avg.toFixed(0)}%` : ""}</div>
                     </div>
-                  );
-                })}
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button className="btn bg bsm" onClick={() => exportCSV(evt, "parcial")}>📊 Parcial</button>
+                      <button className={`btn bsm ${evt.encerrado ? "bs" : "bg"}`} style={!evt.encerrado ? { color: "#333", cursor: "not-allowed" } : {}} onClick={() => { if (evt.encerrado) exportCSV(evt, "final"); }}>🏆 Final</button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ══ AUDITORIA ══ */}
+        {view === VIEWS.AUDITORIA && (
+          <div className="page-in">
+            <div className="ph">
+              <div><div className="ph-t">🔍 Auditoria — Histórico de Alterações</div><div className="ph-s">Registro completo · quem alterou o quê e quando</div></div>
+              <button className="btn bd bsm" onClick={() => { let nd = { ...data, auditLog: [] }; save(nd); showToast("🗑 Logs limpos", "del"); }}>🗑 Limpar</button>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              {["all", "create", "edit", "delete", "export", "system"].map(f => (
+                <button key={f} className={`af-btn ${auditFilter === f ? "active" : ""}`} onClick={() => setAuditFilter(f)}>
+                  {{ all: "Todos", create: "➕ Criações", edit: "✏️ Edições", delete: "🗑 Exclusões", export: "📤 Exportações", system: "⚙️ Sistema" }[f]}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              {Object.entries(users).map(([k, u]) => (
+                <div key={k} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 20, fontSize: 12 }}>
+                  <div style={{ width: 20, height: 20, borderRadius: "50%", background: `${u.color}22`, color: u.color, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 10 }}>{u.name[0]}</div>
+                  <span style={{ color: u.color, fontWeight: 600 }}>{u.name}</span>
+                  <span style={{ color: "#64748b" }}>{u.role}</span>
+                </div>
+              ))}
+            </div>
+            <div className="card">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                <div className="ct" style={{ margin: 0 }}>Registros de Atividade</div>
+                <span style={{ fontSize: 12, color: "#64748b" }}>{filteredAudit.length} registro{filteredAudit.length !== 1 ? "s" : ""}</span>
               </div>
-            )}
+              <div style={{ maxHeight: 500, overflowY: "auto" }}>
+                {filteredAudit.length === 0 ? <div className="empty" style={{ padding: "30px 20px" }}>Nenhum registro</div> :
+                  filteredAudit.map(l => {
+                    const usr = users[l.user] || { name: l.user, color: "#8b5cf6" };
+                    const typeColor = { create: "#34d399", edit: "#fbbf24", delete: "#f87171", export: "#60a5fa", system: "#a78bfa" }[l.type] || "#a78bfa";
+                    const typeLabel = { create: "➕ Criação", edit: "✏️ Edição", delete: "🗑 Exclusão", export: "📤 Export", system: "⚙️ Sistema" }[l.type] || l.type;
+                    return (
+                      <div key={l.id} style={{ display: "flex", gap: 0, alignItems: "flex-start", padding: "12px 0", borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                        <span style={{ fontSize: 11, color: "#64748b", fontFamily: "monospace", width: 120, flexShrink: 0, paddingTop: 2 }}>{fmtShort(l.ts)}</span>
+                        <div style={{ width: 90, flexShrink: 0 }}>
+                          <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                            <div style={{ width: 26, height: 26, borderRadius: "50%", background: `${usr.color}22`, color: usr.color, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 11 }}>{usr.name[0]}</div>
+                            <span style={{ fontSize: 12, fontWeight: 600, color: usr.color }}>{usr.name}</span>
+                          </div>
+                        </div>
+                        <div style={{ flex: 1, padding: "0 12px" }}>
+                          <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            {l.action}
+                            <span style={{ background: `${typeColor}18`, color: typeColor, fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 6, letterSpacing: .5 }}>{typeLabel}</span>
+                          </div>
+                          {l.detail && <div style={{ fontSize: 12, color: "#64748b", marginTop: 3 }}>{l.detail}</div>}
+                        </div>
+                        <span style={{ flexShrink: 0, paddingTop: 2 }}><span style={{ background: "rgba(139,92,246,.1)", color: "#a78bfa", fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 6 }}>{l.page}</span></span>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
           </div>
         )}
 
         {/* ══ LOGS ══ */}
-        {view===VIEWS.LOGS&&(
-          <div style={{animation:"fadeIn .3s"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
-              <div>
-                <div style={{fontSize:22,fontWeight:800}}>🕐 Logs do Sistema</div>
-                <div style={{fontSize:12,color:"#555",marginTop:2}}>{(data.logs||[]).length} registro{(data.logs||[]).length!==1?"s":""}</div>
-              </div>
-              {(data.logs||[]).length>0&&(
-                <button className="btn btn-danger" style={{fontSize:11}} onClick={()=>{let nd={...data,logs:[]};nd=addLog(nd,"Logs limpos");save(nd);show("Logs limpos");}}>🗑 Limpar Logs</button>
-              )}
+        {view === VIEWS.LOGS && (
+          <div className="page-in">
+            <div className="ph">
+              <div><div className="ph-t">🕐 Logs do Sistema</div><div className="ph-s">{(data.logs || []).length} registros</div></div>
+              <button className="btn bd bsm" onClick={() => { let nd = { ...data, logs: [] }; save(nd); showToast("🗑 Logs limpos", "del"); }}>🗑 Limpar</button>
             </div>
-            {(data.logs||[]).length===0?(
-              <div className="empty-state"><div style={{fontSize:48}}>🕐</div><div style={{fontSize:14,marginTop:8}}>Nenhum log registrado ainda</div></div>
-            ):(
-              <div className="card" style={{maxWidth:800}}>
-                {(data.logs||[]).map(log=>(
-                  <div key={log.id} style={{display:"flex",gap:12,alignItems:"flex-start",padding:"8px 0",borderBottom:"1px solid #111"}}>
-                    <span style={{fontSize:11,color:log.tipo==="danger"?"#ff8a7a":log.tipo==="warn"?"#ffd97a":"#888",fontFamily:"'Space Mono',monospace",flexShrink:0,width:130}}>
-                      {new Date(log.ts).toLocaleString("pt-BR")}
-                    </span>
-                    <span style={{fontSize:11,color:log.tipo==="danger"?"#ff8a7a":log.tipo==="warn"?"#ffd97a":"#e0e0e0"}}>{log.msg}</span>
+            <div className="card" style={{ maxWidth: 780 }}>
+              {(data.logs || []).length === 0 ? <div className="empty" style={{ padding: "30px 20px" }}>Nenhum log</div> :
+                (data.logs || []).map(l => (
+                  <div key={l.id} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                    <span style={{ fontSize: 11, color: "#64748b", fontFamily: "monospace", width: 130, flexShrink: 0 }}>{fmtShort(l.ts)}</span>
+                    <span style={{ fontSize: 13, color: l.tipo === "danger" ? "#f87171" : "#e2e8f0" }}>{l.msg}</span>
                   </div>
                 ))}
-              </div>
-            )}
+            </div>
           </div>
         )}
       </div>
 
       {/* ══════════ MODALS ══════════ */}
 
-      {/* MODAL: Editar Evento */}
-      <Modal open={showEditEvt} onClose={()=>setShowEditEvt(false)} title="✏️ Editar Evento">
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <div>
-            <label className="field-label">Nome</label>
-            <input value={editEvtNome} onChange={e=>setEditEvtNome(e.target.value)} placeholder="Nome do evento"/>
-          </div>
-          <div>
-            <label className="field-label">Data</label>
-            <input value={editEvtData} onChange={e=>setEditEvtData(e.target.value)} placeholder="Ex: 15/03/2026"/>
-          </div>
-          <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:4}}>
-            <button className="btn btn-ghost" onClick={()=>setShowEditEvt(false)}>Cancelar</button>
-            <button className="btn btn-accent" onClick={()=>{
-              if(!editEvtNome.trim()){show("Nome obrigatório","error");return;}
-              updateEvento({...activeEvento,nome:editEvtNome.trim(),dataEvento:editEvtData},`Evento renomeado para "${editEvtNome}"`);
-              setShowEditEvt(false); show("Evento atualizado!");
-            }}>Salvar</button>
-          </div>
+      {/* Edit Evento */}
+      <Modal open={editEvtModal} onClose={() => setEditEvtModal(false)} title="✏️ Editar Evento">
+        <Field label="Nome *"><input style={inp} value={editEvtNome} onChange={e => setEditEvtNome(e.target.value)} /></Field>
+        <Field label="Data"><input style={inp} value={editEvtData} onChange={e => setEditEvtData(e.target.value)} /></Field>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+          <button className="btn bg" onClick={() => setEditEvtModal(false)}>Cancelar</button>
+          <button className="btn bp" onClick={salvarEditEvt}>Salvar</button>
         </div>
       </Modal>
 
-      {/* MODAL: Encerrar */}
-      <Modal open={showEncerrar} onClose={()=>setShowEncerrar(false)} title="🔒 Encerrar Evento">
-        <div style={{fontSize:12,color:"#888",marginBottom:16,lineHeight:1.7}}>
-          O percentual será calculado sobre as <strong style={{color:"#ffd97a"}}>{activeEvento?.acoes.length} ações totais</strong>.<br/>
-          Quem entrou tarde terá X retroativos — isso é intencional.
-        </div>
-        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-          <button className="btn btn-ghost" onClick={()=>setShowEncerrar(false)}>Cancelar</button>
-          <button className="btn btn-danger" onClick={encerrarEvento}>Confirmar</button>
+      {/* Encerrar */}
+      <Modal open={showEncerrar} onClose={() => setShowEncerrar(false)} title="🔒 Encerrar Evento">
+        <div style={{ fontSize: 13, color: "#64748b", marginBottom: 16, lineHeight: 1.7 }}>O percentual será calculado sobre as <strong style={{ color: "#fbbf24" }}>{activeEvento?.acoes.length} ações totais</strong>. Quem entrou tarde terá X retroativos — isso é intencional.</div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button className="btn bg" onClick={() => setShowEncerrar(false)}>Cancelar</button>
+          <button className="btn bd" onClick={encerrarEvento}>Confirmar</button>
         </div>
       </Modal>
 
-      {/* MODAL: Exportar */}
-      <Modal open={showExport} onClose={()=>setShowExport(false)} title="📤 Exportar Relatório">
-        <div style={{fontSize:12,color:"#888",marginBottom:20,lineHeight:1.7}}>
-          <strong style={{color:"#e0e0e0"}}>Parcial:</strong> snapshot atual com sorteios e promoters.<br/>
-          <strong style={{color:"#e0e0e0"}}>Final:</strong> apenas quando o evento está encerrado.
-        </div>
-        <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          <button className="btn btn-accent" style={{width:"100%",padding:12}} onClick={()=>{exportCSV(activeEvento,"parcial");setShowExport(false);}}>📊 Relatório Parcial</button>
-          <button style={{width:"100%",padding:12,borderRadius:8,border:"none",fontFamily:"inherit",fontSize:12,fontWeight:600,cursor:activeEvento?.encerrado?"pointer":"not-allowed",background:activeEvento?.encerrado?"#7affc122":"#1a1a28",color:activeEvento?.encerrado?"#7affc1":"#444"}}
-            onClick={()=>{if(activeEvento?.encerrado){exportCSV(activeEvento,"final");setShowExport(false);}}}>
-            🏆 Relatório Final {!activeEvento?.encerrado&&"(encerre primeiro)"}
+      {/* Exportar */}
+      <Modal open={showExport} onClose={() => setShowExport(false)} title="📤 Exportar Relatório">
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <button className="btn bp" style={{ width: "100%", justifyContent: "center", padding: 12 }} onClick={() => { exportCSV(activeEvento, "parcial"); setShowExport(false); }}>📊 Relatório Parcial</button>
+          <button style={{ width: "100%", padding: 12, borderRadius: 10, border: "none", fontFamily: "inherit", fontSize: 14, fontWeight: 600, cursor: activeEvento?.encerrado ? "pointer" : "not-allowed", background: activeEvento?.encerrado ? "rgba(16,185,129,.1)" : "#1a1a28", color: activeEvento?.encerrado ? "#34d399" : "#444", justifyContent: "center" }}
+            onClick={() => { if (activeEvento?.encerrado) { exportCSV(activeEvento, "final"); setShowExport(false); } }}>
+            🏆 Relatório Final {!activeEvento?.encerrado && "(encerre primeiro)"}
           </button>
-          <button className="btn btn-ghost" onClick={()=>setShowExport(false)}>Cancelar</button>
+          <button className="btn bg" style={{ width: "100%", justifyContent: "center" }} onClick={() => setShowExport(false)}>Cancelar</button>
         </div>
       </Modal>
 
-      {/* MODAL: Novo/Editar Promoter */}
-      <Modal open={promoterModal} onClose={()=>{setPromoterModal(false);setEditingPromoter(null);}} title={editingPromoter?"✏️ Editar Promoter":"➕ Novo Promoter"}>
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <div>
-            <label className="field-label">Nome *</label>
-            <input value={pNome} onChange={e=>setPNome(e.target.value)} placeholder="Nome completo"/>
-          </div>
-          <div>
-            <label className="field-label">Email *</label>
-            <input value={pEmail} onChange={e=>setPEmail(e.target.value)} placeholder="email@exemplo.com" type="email"/>
-          </div>
-          <div>
-            <label className="field-label">Link *</label>
-            <input value={pLink} onChange={e=>setPLink(e.target.value)} placeholder="https://link.com/promoter"/>
-          </div>
-          <div>
-            <label className="field-label">Categoria</label>
-            <select value={pCategoria} onChange={e=>setPCategoria(e.target.value)} style={{background:"#0a0a12",border:"1px solid #1e1e2e",borderRadius:8,padding:"10px 14px",color:"#e0e0e0",fontSize:13,width:"100%"}}>
-              {CATS.map(c=><option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-          {activeEvento?.condicoes?.[pCategoria]&&(
-            <div style={{background:"#ffd97a11",border:"1px solid #ffd97a33",borderRadius:8,padding:"8px 12px",fontSize:11,color:"#ffd97a"}}>
-              📋 Condições para {pCategoria}: {activeEvento.condicoes[pCategoria]}
-            </div>
-          )}
-          <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:4}}>
-            <button className="btn btn-ghost" onClick={()=>{setPromoterModal(false);setEditingPromoter(null);}}>Cancelar</button>
-            <button className="btn btn-accent" onClick={salvarPromoter}>{editingPromoter?"Salvar Alterações":"Cadastrar"}</button>
-          </div>
+      {/* Promoter */}
+      <Modal open={promModal} onClose={() => { setPromModal(false); setEditingProm(null); }} title={editingProm ? "✏️ Editar Promoter" : "➕ Novo Promoter"}>
+        <Field label="Nome *"><input style={inp} value={pNome} onChange={e => setPNome(e.target.value)} placeholder="Nome completo" /></Field>
+        <Field label="Email *"><input style={inp} type="email" value={pEmail} onChange={e => setPEmail(e.target.value)} placeholder="email@exemplo.com" /></Field>
+        <Field label="Link *"><input style={inp} value={pLink} onChange={e => setPLink(e.target.value)} placeholder="https://vslt.com/r/link" /></Field>
+        <Field label="Categoria"><select style={inp} value={pCat} onChange={e => setPCat(e.target.value)}>{CATS.map(c => <option key={c} value={c}>{c}</option>)}</select></Field>
+        {activeEvento?.condicoes?.[pCat] && <div style={{ background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.2)", borderRadius: 9, padding: "9px 13px", fontSize: 12, color: "#fbbf24", marginBottom: 13 }}>📋 {activeEvento.condicoes[pCat]}</div>}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+          <button className="btn bg" onClick={() => { setPromModal(false); setEditingProm(null); }}>Cancelar</button>
+          <button className="btn bp" onClick={salvarPromoter}>{editingProm ? "Salvar" : "Cadastrar"}</button>
         </div>
       </Modal>
 
-      {/* MODAL: Registrar Venda */}
-      <Modal open={!!vendaModal} onClose={()=>{setVendaModal(null);setEditingVenda(null);}} title={editingVenda?"✏️ Editar Venda":"💳 Registrar Venda"} width={480}>
-        {vendaModal&&(()=>{
-          const p=activeEvento?.promoters?.find(x=>x.id===vendaModal);
-          return(
-            <div style={{display:"flex",flexDirection:"column",gap:12}}>
-              {p&&<div style={{fontSize:12,color:"#c8a2ff",marginBottom:4}}>Promoter: <strong>{p.nome}</strong> · {p.categoria}</div>}
-              <div style={{display:"flex",gap:8}}>
-                <div style={{flex:1}}>
-                  <label className="field-label">Qtd Ingressos *</label>
-                  <input value={vQtd} onChange={e=>setVQtd(e.target.value)} type="number" min="1" style={{textAlign:"center"}}/>
-                </div>
-                <div style={{flex:1}}>
-                  <label className="field-label">Valor Unit. (R$) *</label>
-                  <input value={vValor} onChange={e=>setVValor(e.target.value)} type="number" min="0" step="0.01" placeholder="0,00"/>
-                </div>
-              </div>
-              {vQtd&&vValor&&(
-                <div style={{background:"#7affc111",border:"1px solid #7affc133",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#7affc1",textAlign:"center"}}>
-                  Total: <strong>{fmtCur(parseInt(vQtd||0)*parseFloat(vValor||0))}</strong>
-                </div>
-              )}
-              <div>
-                <label className="field-label">Comprovante Pix (link ou descrição)</label>
-                <input value={vComprovante} onChange={e=>setVComprovante(e.target.value)} placeholder="Ex: https://... ou 'comprovante enviado no WhatsApp'"/>
-              </div>
-              <div>
-                <label className="field-label">Observação</label>
-                <input value={vObs} onChange={e=>setVObs(e.target.value)} placeholder="Ex: pagamento referente ao lote 1"/>
-              </div>
-              <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:4}}>
-                <button className="btn btn-ghost" onClick={()=>{setVendaModal(null);setEditingVenda(null);}}>Cancelar</button>
-                <button className="btn btn-accent" onClick={salvarVenda}>{editingVenda?"Salvar":"Registrar Venda"}</button>
-              </div>
-            </div>
-          );
+      {/* Venda */}
+      <Modal open={vendaModal} onClose={() => { setVendaModal(false); setEditingVendaId(null); }} title={editingVendaId ? "✏️ Editar Venda" : "💳 Registrar Venda"}>
+        {vendaPromId && (() => {
+          const p = activeEvento?.promoters?.find(x => x.id === vendaPromId);
+          return <div style={{ background: "rgba(139,92,246,.08)", border: "1px solid rgba(139,92,246,.2)", borderRadius: 9, padding: "9px 13px", fontSize: 13, color: "#a78bfa", marginBottom: 14 }}>Promoter: <strong>{p?.nome}</strong> · {p?.categoria}</div>;
         })()}
-      </Modal>
-
-      {/* MODAL: Condições de Venda */}
-      <Modal open={condicoesModal} onClose={()=>setCondicoesModal(false)} title="📋 Condições de Venda por Categoria">
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <div>
-            <label className="field-label">Categoria</label>
-            <select value={condicoesCat} onChange={e=>{setCondicoesCat(e.target.value);setCondicoesTexto(activeEvento?.condicoes?.[e.target.value]||"");}} style={{background:"#0a0a12",border:"1px solid #1e1e2e",borderRadius:8,padding:"10px 14px",color:"#e0e0e0",fontSize:13,width:"100%"}}>
-              {CATS.map(c=><option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="field-label">Condições de venda para {condicoesCat}</label>
-            <textarea value={condicoesTexto} onChange={e=>setCondicoesTexto(e.target.value)}
-              placeholder={`Descreva as condições para ${condicoesCat}:\nEx: 1 ingresso por venda mínima de R$ 60\nComissão: 10% sobre total vendido\nPrazo de entrega: até 3 dias antes do evento`}
-              style={{minHeight:130,fontSize:12}}/>
-          </div>
-          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-            <button className="btn btn-ghost" onClick={()=>setCondicoesModal(false)}>Cancelar</button>
-            <button className="btn btn-accent" onClick={salvarCondicoes}>Salvar Condições</button>
-          </div>
+        <div style={{ display: "flex", gap: 12 }}>
+          <Field label="Qtd *" style={{ flex: 1 }}><input style={{ ...inp, textAlign: "center" }} type="number" min="1" value={vQtd} onChange={e => setVQtd(e.target.value)} /></Field>
+          <Field label="Valor Unit. R$ *" style={{ flex: 1 }}><input style={inp} type="number" min="0" step="0.01" value={vValor} onChange={e => setVValor(e.target.value)} placeholder="60" /></Field>
+        </div>
+        {vQtd && vValor && <div style={{ background: "rgba(16,185,129,.08)", border: "1px solid rgba(16,185,129,.2)", borderRadius: 9, padding: "10px 14px", fontSize: 14, color: "#34d399", textAlign: "center", marginBottom: 13 }}>Total: <strong>{fmtCur(parseInt(vQtd || 0) * parseFloat(vValor || 0))}</strong></div>}
+        <Field label="Comprovante Pix"><input style={inp} value={vComp} onChange={e => setVComp(e.target.value)} placeholder="Link ou descrição" /></Field>
+        <Field label="Observação"><input style={inp} value={vObs} onChange={e => setVObs(e.target.value)} placeholder="Ex: lote 1" /></Field>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+          <button className="btn bg" onClick={() => { setVendaModal(false); setEditingVendaId(null); }}>Cancelar</button>
+          <button className="btn bp" onClick={salvarVenda}>{editingVendaId ? "Salvar" : "Registrar"}</button>
         </div>
       </Modal>
 
-      {/* MODAL: DUP REVIEW */}
-      <Modal open={!!dupReview} onClose={()=>setDupReview(null)} title="⚠️ Nomes Similares Detectados" width={600}>
-        {dupReview&&(
+      {/* Condições */}
+      <Modal open={condModal} onClose={() => setCondModal(false)} title="📋 Condições de Venda">
+        <Field label="Categoria"><select style={inp} value={condCat} onChange={e => { setCondCat(e.target.value); setCondTexto(activeEvento?.condicoes?.[e.target.value] || ""); }}>{CATS.map(c => <option key={c} value={c}>{c}</option>)}</select></Field>
+        <Field label={`Condições para ${condCat}`}><textarea style={{ ...inp, minHeight: 130, fontSize: 13 }} value={condTexto} onChange={e => setCondTexto(e.target.value)} placeholder={`Ex: Mínimo R$60/venda\nComissão: 10%\nPrazo: 3 dias antes`} /></Field>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+          <button className="btn bg" onClick={() => setCondModal(false)}>Cancelar</button>
+          <button className="btn bp" onClick={salvarCondicoes}>Salvar</button>
+        </div>
+      </Modal>
+
+      {/* Metas */}
+      <Modal open={metasModal} onClose={() => setMetasModal(false)} title="🎯 Editar Metas">
+        {tempMetas.map((m, i) => (
+          <div key={i} style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+            <input style={{ ...inp, flex: 1 }} value={m.label} onChange={e => { const c = [...tempMetas]; c[i].label = e.target.value; setTempMetas(c); }} placeholder="Nome da faixa" />
+            <input style={{ ...inp, width: 80, textAlign: "center" }} type="number" value={m.percentual} onChange={e => { const c = [...tempMetas]; c[i].percentual = e.target.value; setTempMetas(c); }} placeholder="%" />
+            <span style={{ color: "#64748b" }}>%</span>
+            {tempMetas.length > 1 && <button className="btn bd bsm" onClick={() => setTempMetas(tempMetas.filter((_, j) => j !== i))}>✕</button>}
+          </div>
+        ))}
+        <button className="btn bg bsm" onClick={() => setTempMetas([...tempMetas, { label: "", percentual: "" }])} style={{ marginBottom: 16 }}>+ Adicionar</button>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button className="btn bg" onClick={() => setMetasModal(false)}>Cancelar</button>
+          <button className="btn bp" onClick={salvarMetas}>Salvar</button>
+        </div>
+      </Modal>
+
+      {/* Dup Review */}
+      <Modal open={!!dupReview} onClose={() => setDupReview(null)} title="⚠️ Nomes Similares" width={580}>
+        {dupReview && (
           <>
-            <div style={{fontSize:11,color:"#888",marginBottom:16}}>Revise antes de submeter</div>
-            <div style={{maxHeight:380,overflowY:"auto"}}>
-              {dupReview.suspects.map((s,i)=>(
-                <div key={i} style={{padding:"12px 0",borderBottom:"1px solid #1a1a28"}}>
-                  <div style={{marginBottom:6}}>
-                    <div style={{fontSize:12}}><span style={{color:"#ffd97a"}}>NOVO:</span> {s.new.nome} {s.new.instagram&&<span style={{color:"#c8a2ff",fontSize:10}}>@{s.new.instagram}</span>}</div>
-                    <div style={{fontSize:12}}><span style={{color:"#7affc1"}}>EXISTENTE:</span> {s.existing.nome} {s.existing.instagram&&<span style={{color:"#c8a2ff",fontSize:10}}>@{s.existing.instagram}</span>}</div>
+            <div style={{ maxHeight: 380, overflowY: "auto" }}>
+              {dupReview.suspects.map((s, i) => (
+                <div key={i} style={{ padding: "12px 0", borderBottom: "1px solid rgba(255,255,255,.06)" }}>
+                  <div style={{ marginBottom: 6 }}>
+                    <div style={{ fontSize: 13 }}><span style={{ color: "#fbbf24" }}>NOVO:</span> {s.new.nome}{s.new.instagram && <span style={{ color: "#a78bfa", fontSize: 11 }}> @{s.new.instagram}</span>}</div>
+                    <div style={{ fontSize: 13 }}><span style={{ color: "#34d399" }}>EXISTENTE:</span> {s.existing.nome}</div>
                   </div>
-                  <span className="badge" style={{background:"#ffd97a22",color:"#ffd97a",marginBottom:8,display:"inline-block"}}>{s.reason}</span>
-                  <div style={{display:"flex",gap:6,marginTop:6}}>
-                    {["merge","novo","ignorar"].map(opt=>(
-                      <button key={opt} className={`btn ${dupReview.decisions[i]===opt?"btn-accent":"btn-ghost"}`} style={{fontSize:10,padding:"4px 12px"}}
-                        onClick={()=>setDupReview({...dupReview,decisions:dupReview.decisions.map((d,j)=>j===i?opt:d)})}>
-                        {opt==="merge"?"🔗 Unificar":opt==="novo"?"➕ Nova":"🚫 Ignorar"}
+                  <span style={{ background: "rgba(251,191,36,.12)", color: "#fbbf24", fontSize: 11, padding: "2px 8px", borderRadius: 6 }}>{s.reason}</span>
+                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                    {["merge", "novo", "ignorar"].map(opt => (
+                      <button key={opt} className={`btn bsm ${dupReview.decisions[i] === opt ? "bp" : "bg"}`}
+                        onClick={() => setDupReview({ ...dupReview, decisions: dupReview.decisions.map((d, j) => j === i ? opt : d) })}>
+                        {opt === "merge" ? "🔗 Unificar" : opt === "novo" ? "➕ Nova" : "🚫 Ignorar"}
                       </button>
                     ))}
                   </div>
                 </div>
               ))}
             </div>
-            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:16}}>
-              <button className="btn btn-ghost" onClick={()=>setDupReview(null)}>Cancelar</button>
-              <button className="btn btn-accent" onClick={()=>{
-                const md=dupReview.suspects.map((s,i)=>({action:dupReview.decisions[i],newEntry:s.new,existingId:s.existing.id}));
-                const ignored=new Set(md.filter(d=>d.action==="ignorar").map(d=>normStr(d.newEntry.nome)));
-                const finalParsed=dupReview.parsed.filter(p=>!ignored.has(normStr(p.nome)));
-                confirmarAcaoFinal(finalParsed,dupReview.num,dupReview.nome,md.filter(d=>d.action==="merge"));
-              }}>Confirmar e Processar</button>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+              <button className="btn bg" onClick={() => setDupReview(null)}>Cancelar</button>
+              <button className="btn bp" onClick={() => {
+                const md = dupReview.suspects.map((s, i) => ({ action: dupReview.decisions[i], newEntry: s.new, existingId: s.existing.id }));
+                const ignored = new Set(md.filter(d => d.action === "ignorar").map(d => normStr(d.newEntry.nome)));
+                const finalParsed = dupReview.parsed.filter(p => !ignored.has(normStr(p.nome)));
+                confirmarAcao(finalParsed, dupReview.num, dupReview.nome, md.filter(d => d.action === "merge"));
+              }}>Confirmar</button>
             </div>
           </>
         )}
@@ -1623,58 +1548,116 @@ export default function App() {
   );
 }
 
-const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
+/* ── LOGIN SCREEN ─────────────────────────────────────────── */
+function LoginScreen({ loginUser, setLoginUser, loginPass, setLoginPass, loginErr, doLogin }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "radial-gradient(ellipse 80% 60% at 50% -10%,rgba(139,92,246,.2),transparent)", fontFamily: "'Inter',system-ui,sans-serif" }}>
+      <div style={{ width: 420, background: "rgba(17,17,32,.9)", border: "1px solid rgba(139,92,246,.25)", borderRadius: 24, padding: "52px 44px", animation: "fadeUp .4s" }}>
+        <div style={{ textAlign: "center", marginBottom: 36 }}>
+          <div style={{ fontSize: 32, fontWeight: 800, letterSpacing: 3, background: "linear-gradient(135deg,#a78bfa,#7c3aed)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>VSLT</div>
+          <div style={{ fontSize: 12, color: "#64748b", marginTop: 4, letterSpacing: 2 }}>Sistema de Gestão · Produções</div>
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1.5, color: "#64748b", marginBottom: 8 }}>Usuário</label>
+          <input style={{ width: "100%", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 12, padding: "14px 18px", color: "#e2e8f0", fontSize: 15, outline: "none", fontFamily: "inherit", boxSizing: "border-box" }}
+            value={loginUser} onChange={e => setLoginUser(e.target.value)} placeholder="admin" type="text" />
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1.5, color: "#64748b", marginBottom: 8 }}>Senha</label>
+          <input style={{ width: "100%", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 12, padding: "14px 18px", color: "#e2e8f0", fontSize: 15, outline: "none", fontFamily: "inherit", boxSizing: "border-box" }}
+            value={loginPass} onChange={e => setLoginPass(e.target.value)} placeholder="••••••••" type="password" onKeyDown={e => e.key === "Enter" && doLogin()} />
+        </div>
+        <button onClick={doLogin} style={{ width: "100%", padding: "15px", background: "linear-gradient(135deg,#8b5cf6,#7c3aed)", border: "none", borderRadius: 12, color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", transition: "all .2s" }}>Entrar no Sistema</button>
+        {loginErr && <div style={{ color: "#f87171", fontSize: 13, textAlign: "center", marginTop: 12 }}>⚠ Credenciais inválidas</div>}
+        <div style={{ marginTop: 20, padding: "12px 16px", background: "rgba(139,92,246,.06)", border: "1px solid rgba(139,92,246,.15)", borderRadius: 10, fontSize: 12, color: "#64748b" }}>
+          <strong style={{ color: "#a78bfa" }}>Usuários disponíveis:</strong><br />
+          admin / adminvslt · vitor / vslt2024 · lucas / lucas123
+        </div>
+      </div>
+      <style>{`@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}`}</style>
+    </div>
+  );
+}
+
+/* ── GLOBAL CSS ───────────────────────────────────────────── */
+const GLOBAL_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
+::-webkit-scrollbar{width:4px;height:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#2a2a45;border-radius:4px}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-@keyframes fadeIn{from{opacity:0}to{opacity:1}}
-@keyframes slideUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-@keyframes diceSpin{0%{transform:rotate(0deg) scale(1)}25%{transform:rotate(90deg) scale(1.15)}50%{transform:rotate(180deg) scale(1)}75%{transform:rotate(270deg) scale(1.15)}100%{transform:rotate(360deg) scale(1)}}
-.card{background:#12121a;border:1px solid #1e1e2e;border-radius:12px;padding:20px;animation:slideUp .25s ease}
-.evt-card{cursor:pointer;transition:all .2s}
-.evt-card:hover{border-color:#c8a2ff44;transform:translateY(-2px)}
-.nav-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:none;background:transparent;color:#555;font-family:inherit;font-size:12px;cursor:pointer;transition:all .15s;border-radius:6px;text-align:left}
-.nav-item:hover{color:#aaa;background:#1a1a28}
-.nav-active{color:#c8a2ff !important;background:#c8a2ff18 !important}
-.btn{padding:8px 16px;border:none;border-radius:8px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;letter-spacing:.3px}
-.btn:disabled{opacity:.5;cursor:not-allowed}
-.btn-accent{background:linear-gradient(135deg,#c8a2ff,#7a5af5);color:white}
-.btn-accent:hover:not(:disabled){opacity:.9;transform:translateY(-1px)}
-.btn-danger{background:#ff4a4a18;color:#ff6b6b;border:1px solid #ff4a4a33}
-.btn-danger:hover{background:#ff4a4a28}
-.btn-ghost{background:transparent;color:#888;border:1px solid #1e1e2e}
-.btn-ghost:hover{color:#e0e0e0;border-color:#333}
-input,textarea,select{background:#0a0a12;border:1px solid #1e1e2e;border-radius:8px;padding:10px 14px;color:#e0e0e0;font-family:inherit;font-size:13px;width:100%;outline:none;transition:border-color .2s}
-input:focus,textarea:focus,select:focus{border-color:#c8a2ff}
-textarea{resize:vertical;min-height:100px}
-select option{background:#0a0a12;color:#e0e0e0}
-.tab{padding:10px 14px;border:none;background:transparent;color:#555;font-family:inherit;font-size:12px;cursor:pointer;transition:all .2s;border-bottom:2px solid transparent;display:flex;align-items:center;gap:5px;white-space:nowrap}
-.tab:hover{color:#999}
-.tab.active{color:#e0e0e0;border-bottom-color:#c8a2ff}
-.stat-card{background:#12121a;border:1px solid #1e1e2e;border-radius:12px;padding:16px;text-align:center}
-.stat-num{font-family:'Space Mono',monospace;font-size:28px;font-weight:700}
-.stat-label{font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1.5px;margin-top:2px}
-.section-title{font-size:12px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px}
-.field-label{font-size:11px;color:#888;font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;display:block}
-.rank-row{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;margin-bottom:4px;background:#0d0d15;border:1px solid #181828;transition:all .15s}
-.rank-row:hover{border-color:#282840}
-.rank-pos{font-family:'Space Mono',monospace;font-size:13px;font-weight:700;width:28px}
-.prog-bar{height:5px;background:#1a1a28;border-radius:3px;overflow:hidden}
-.prog-fill{height:100%;border-radius:3px;background:linear-gradient(90deg,#c8a2ff,#7affc1);transition:width .5s}
-.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:600}
-.table-wrap{overflow:auto;border-radius:12px;border:1px solid #1e1e2e;max-height:70vh}
-table{width:100%;border-collapse:collapse;font-size:11px}
-th{background:#12121a;padding:8px 10px;text-align:left;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:.8px;font-size:9px;position:sticky;top:0;z-index:2}
-td{padding:6px 10px;border-top:1px solid #14141f}
-tr:hover td{background:#14141f55}
-.cell-ok{color:#7affc1;font-weight:700;text-align:center}
-.cell-x{color:#ff6b6b;font-weight:700;text-align:center}
-.toast{position:fixed;bottom:20px;right:20px;padding:10px 18px;border-radius:10px;font-size:12px;font-weight:500;z-index:9999;animation:slideUp .3s}
-.toast-success{background:#7affc1;color:#0a0a0f}
-.toast-error{background:#ff6b6b;color:white}
-.empty-state{text-align:center;padding:60px 20px;color:#444}
-.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.8);z-index:1000;display:flex;align-items:center;justify-content:center;animation:fadeIn .15s}
-.modal{background:#12121a;border:1px solid #2a2a3e;border-radius:16px;padding:24px;max-height:88vh;overflow-y:auto;width:92%;animation:slideUp .2s}
-details summary::-webkit-details-marker{display:none}
-details>summary{list-style:none}
+@keyframes spin{0%{transform:rotate(0) scale(1)}25%{transform:rotate(90deg) scale(1.2)}50%{transform:rotate(180deg) scale(1)}75%{transform:rotate(270deg) scale(1.2)}100%{transform:rotate(360deg) scale(1)}}
+@keyframes flash{0%{background:rgba(139,92,246,.2)}100%{background:transparent}}
+.sidebar{width:240px;background:#0d0d18;border-right:1px solid #1c1c2e;position:fixed;top:0;left:0;bottom:0;z-index:100;display:flex;flex-direction:column}
+.sb-head{padding:26px 20px 20px;border-bottom:1px solid #1c1c2e}
+.sb-brand{font-size:21px;font-weight:800;letter-spacing:2px;background:linear-gradient(135deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sb-sub{font-size:10px;color:#3d3d6b;text-transform:uppercase;letter-spacing:3px;margin-top:2px}
+.sb-nav{flex:1;padding:14px 10px;overflow-y:auto}
+.nb{display:flex;align-items:center;gap:12px;width:100%;padding:12px 14px;border:none;background:transparent;color:#64748b;font-size:14px;cursor:pointer;border-radius:12px;text-align:left;transition:all .2s;margin-bottom:3px;font-family:inherit;font-weight:500;position:relative}
+.nb:hover{color:#ccc;background:rgba(255,255,255,.04)}
+.nb.active{color:#fff;background:linear-gradient(135deg,rgba(139,92,246,.22),rgba(124,58,237,.12));border:1px solid rgba(139,92,246,.18)}
+.nb.active::before{content:'';position:absolute;left:0;top:25%;bottom:25%;width:3px;background:#8b5cf6;border-radius:0 3px 3px 0}
+.nb-ic{font-size:21px;width:28px;text-align:center;flex-shrink:0}
+.nb-pill{font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:rgba(139,92,246,.2);color:#a78bfa}
+.sb-sec{font-size:10px;color:#2a2a4a;font-weight:700;text-transform:uppercase;letter-spacing:2px;padding:12px 14px 5px}
+.eb{display:flex;align-items:center;gap:10px;width:100%;padding:9px 14px;border:none;background:transparent;color:#64748b;font-size:12px;cursor:pointer;border-radius:9px;text-align:left;transition:all .15s;font-family:inherit}
+.eb:hover{color:#bbb;background:rgba(255,255,255,.03)}.eb.active{color:#a78bfa;background:rgba(139,92,246,.08)}
+.edot{width:8px;height:8px;border-radius:50%;background:#10b981;flex-shrink:0}.edot.closed{background:#64748b}
+.sb-foot{padding:13px 10px;border-top:1px solid #1c1c2e}
+.urow{display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,.03);border-radius:10px}
+.uav{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;flex-shrink:0}
+.uname{font-size:13px;font-weight:600;flex:1}.urole{font-size:11px;color:#64748b}
+.uout{background:transparent;border:none;color:#64748b;cursor:pointer;font-size:18px;padding:4px;border-radius:6px;transition:color .2s}.uout:hover{color:#ef4444}
+.main{margin-left:240px;padding:30px 34px;min-height:100vh}
+.page-in{animation:fadeUp .25s}
+.ph{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:26px}
+.ph-t{font-size:25px;font-weight:800;color:#fff;letter-spacing:-.5px}.ph-s{font-size:13px;color:#64748b;margin-top:4px}
+.sg{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+.sc{background:#12121f;border:1px solid #1c1c2e;border-radius:16px;padding:20px;transition:all .2s}
+.sc:hover{border-color:#252540;transform:translateY(-2px)}
+.sc-ic{font-size:30px;margin-bottom:10px;display:block}
+.sc-n{font-size:32px;font-weight:800;font-family:'Space Mono',monospace;letter-spacing:-1px}
+.sc-l{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1.5px;margin-top:4px}
+.card{background:#12121f;border:1px solid #1c1c2e;border-radius:16px;padding:20px;margin-bottom:14px}
+.ct{font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:14px}
+.tabs{display:flex;gap:2px;border-bottom:1px solid #1c1c2e;margin-bottom:22px;overflow-x:auto}
+.tab{display:flex;align-items:center;gap:7px;padding:12px 16px;border:none;background:transparent;color:#64748b;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;font-family:inherit;font-weight:500}
+.tab:hover{color:#bbb}.tab.active{color:#fff;border-bottom-color:#8b5cf6}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;border:none;font-family:inherit;white-space:nowrap}
+.bp{background:linear-gradient(135deg,#8b5cf6,#7c3aed);color:#fff}.bp:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 6px 20px rgba(139,92,246,.35)}
+.bp:disabled{opacity:.5;cursor:not-allowed}
+.bg{background:transparent;border:1px solid #1c1c2e;color:#64748b}.bg:hover{border-color:#252540;color:#e2e8f0}
+.bd{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);color:#f87171}.bd:hover{background:rgba(239,68,68,.14)}
+.bs{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);color:#34d399}
+.be{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);color:#fbbf24}.be:hover{background:rgba(245,158,11,.14)}
+.bsm{padding:6px 13px;font-size:12px;border-radius:8px}
+.badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.bpu{background:rgba(139,92,246,.15);color:#a78bfa}.bgr{background:rgba(16,185,129,.15);color:#34d399}
+.br{background:rgba(239,68,68,.15);color:#f87171}.by{background:rgba(245,158,11,.15);color:#fbbf24}
+.bbl{background:rgba(59,130,246,.15);color:#60a5fa}
+.tbl{width:100%;border-collapse:collapse}
+.tbl th{padding:10px 13px;text-align:left;color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #1c1c2e;font-weight:600}
+.tbl td{padding:10px 13px;border-bottom:1px solid rgba(255,255,255,.04)}
+.tbl tr:hover td{background:rgba(255,255,255,.02)}
+.cell-ok{color:#34d399;font-weight:700;text-align:center}.cell-x{color:#f87171;font-weight:700;text-align:center}
+.tbl-wrap{overflow:auto;border:1px solid #1c1c2e;border-radius:14px;max-height:380px}
+.rr{display:flex;align-items:center;gap:12px;padding:11px 13px;background:#0d0d18;border:1px solid #1c1c2e;border-radius:12px;margin-bottom:5px;transition:all .15s}
+.rr:hover{border-color:#252540;transform:translateX(3px)}
+.rpos{font-size:15px;font-weight:700;width:30px;text-align:center}
+.prog{height:6px;background:#1a1a2e;border-radius:4px;overflow:hidden}
+.pf{height:100%;border-radius:4px;background:linear-gradient(90deg,#8b5cf6,#34d399);transition:width .6s}
+.pc{background:#12121f;border:1px solid #1c1c2e;border-radius:16px;padding:20px;margin-bottom:14px;transition:border-color .2s}
+.pc:hover{border-color:#252540}
+.evt-card{background:#12121f;border:1px solid #1c1c2e;border-radius:16px;padding:20px;cursor:pointer;transition:all .2s;margin-bottom:0}
+.evt-card:hover{border-color:rgba(139,92,246,.4);transform:translateY(-2px)}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.empty{text-align:center;padding:60px 20px;color:#64748b}
+.edit-input{background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.4);border-radius:7px;padding:6px 10px;color:#e2e8f0;font-size:13px;outline:none;font-family:inherit;width:100%}
+.af-btn{padding:6px 14px;border-radius:20px;border:1px solid #1c1c2e;background:transparent;color:#64748b;font-size:12px;cursor:pointer;transition:all .15s;font-family:inherit}
+.af-btn:hover{border-color:#252540;color:#e2e8f0}.af-btn.active{background:rgba(139,92,246,.15);border-color:rgba(139,92,246,.4);color:#a78bfa}
+.toast{position:fixed;bottom:26px;right:26px;padding:13px 20px;border-radius:13px;font-size:14px;font-weight:600;z-index:9999;animation:fadeUp .3s;box-shadow:0 8px 24px rgba(0,0,0,.3);color:#fff}
+.toast-ok{background:linear-gradient(135deg,#10b981,#059669)}
+.toast-edit{background:linear-gradient(135deg,#f59e0b,#d97706)}
+.toast-del{background:linear-gradient(135deg,#ef4444,#b91c1c)}
+details summary::-webkit-details-marker{display:none}details>summary{list-style:none}
 `;
