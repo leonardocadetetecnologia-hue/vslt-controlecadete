@@ -5,8 +5,8 @@
 
 import { createClient } from "@supabase/supabase-js";
 
-const SUPABASE_URL = "https://rtjsbmedjfgquekujlix.supabase.co";
-const SUPABASE_KEY = "sb_publishable_N1LPS0ADwQurGzh2-Yx2_A_6RItSHsN";
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY;
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -51,6 +51,16 @@ export async function criarEvento({ nome, data_evento, criado_por }) {
     .from("eventos")
     .insert({ nome, data_evento, criado_por })
     .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function buscarEvento(id) {
+  const { data, error } = await supabase
+    .from("eventos")
+    .select("*")
+    .eq("id", id)
     .single();
   if (error) throw error;
   return data;
