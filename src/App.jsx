@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
+  supabase,
   loginUsuario, listarUsuarios,
-  listarEventos, buscarEvento, criarEvento as dbCriarEvento, atualizarEvento, deletarEvento as dbDeletarEvento,
+  listarEventos, criarEvento as dbCriarEvento, atualizarEvento, deletarEvento as dbDeletarEvento,
   encerrarEvento as dbEncerrarEvento, reabrirEvento as dbReabrirEvento, salvarCondicoes,
   listarMetas, salvarMetas as dbSalvarMetas,
   listarAcoes, criarAcao, atualizarAcao, deletarAcao,
@@ -128,6 +129,7 @@ export default function App() {
   // Auditoria
   const [auditLog, setAuditLog] = useState([]);
   const [auditFilter, setAuditFilter] = useState("all");
+  const [mobileMenu, setMobileMenu] = useState(false);
 
   // Sorteio global
   const [todosOsSorteios, setTodosOsSorteios] = useState([]);
@@ -149,6 +151,12 @@ export default function App() {
   const [dupReview, setDupReview] = useState(null);
   const [editingAcaoId, setEditingAcaoId] = useState(null);
   const [editAcaoTexto, setEditAcaoTexto] = useState("");
+  // Preview/validação antes de importar
+  const [previewLista, setPreviewLista] = useState(null); // null | [{nome,instagram}]
+  const [previewAcaoNum, setPreviewAcaoNum] = useState("");
+  const [previewAcaoNome, setPreviewAcaoNome] = useState("");
+  // Edição segura de ação (sem apagar banco antes de confirmar)
+  const [editAcaoPreview, setEditAcaoPreview] = useState(null); // {acaoId, acaoNumero, lista:[]}
 
   // Modais
   const [editEvtModal, setEditEvtModal] = useState(false);
@@ -240,7 +248,8 @@ export default function App() {
   const abrirEvento = useCallback(async (id) => {
     setLoading(true);
     try {
-      const evtRow = await buscarEvento(id);
+      const evtInfoData = await atualizarEvento(id, {}); // apenas busca
+      const { data: evtRow } = await supabase.from("eventos").select("*").eq("id",id).single();
       const loaded = await carregarEvento(id);
       setEvtInfo(evtRow);
       setEvtData(loaded);
@@ -256,7 +265,7 @@ export default function App() {
   const recarregarEvento = useCallback(async () => {
     if (!activeEventoId) return;
     const [evtRow, loaded] = await Promise.all([
-      buscarEvento(activeEventoId),
+      supabase.from("eventos").select("*").eq("id",activeEventoId).single().then(r=>r.data),
       carregarEvento(activeEventoId),
     ]);
     setEvtInfo(evtRow);
@@ -346,19 +355,39 @@ export default function App() {
   }, [activeEventoId, tempMetas, audit, showToast]);
 
   // ── IMPORTAR AÇÃO ─────────────────────────────────────────────
+  const lerArquivoTxt = useCallback((e)=>{
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!file.name.endsWith(".txt")){ showToast("Envie um arquivo .txt","del"); return; }
+    const reader = new FileReader();
+    reader.onload = (ev) => { setAcaoTexto(ev.target.result); showToast("✅ Arquivo carregado!"); };
+    reader.readAsText(file, "UTF-8");
+    e.target.value = "";
+  }, [showToast]);
+
   const processarAcao = useCallback(()=>{
-    if (!acaoTexto.trim()){ showToast("Cole a lista","del"); return; }
+    if (!acaoTexto.trim()){ showToast("Cole a lista ou envie um arquivo .txt","del"); return; }
     const num = parseInt(acaoNum)||(evtData.acoes.length+1);
     if (evtData.acoes.find(a=>a.numero===num)){ showToast(`Ação ${num} já existe!`,"del"); return; }
     const parsed = parseLista(acaoTexto);
     if (!parsed.length){ showToast("Nenhum nome encontrado","del"); return; }
-    const suspects = findDuplicates(parsed, evtData.divulgadoras).filter(s=>s.score<1);
-    if (suspects.length>0) {
-      setDupReview({parsed,num,nome:acaoNome||`Ação ${num}`,suspects,decisions:suspects.map(()=>"merge")});
-    } else {
-      confirmarAcao(parsed,num,acaoNome||`Ação ${num}`,[]);
-    }
+    // Abre preview para validação antes de importar
+    setPreviewLista(parsed.map((p,i)=>({...p, _id:i})));
+    setPreviewAcaoNum(String(num));
+    setPreviewAcaoNome(acaoNome||`Ação ${num}`);
   }, [acaoTexto, acaoNum, acaoNome, evtData, showToast]);
+
+  const confirmarPreview = useCallback(()=>{
+    if (!previewLista||!previewLista.length){ showToast("Lista vazia","del"); return; }
+    const num = parseInt(previewAcaoNum);
+    const suspects = findDuplicates(previewLista, evtData.divulgadoras).filter(s=>s.score<1);
+    setPreviewLista(null);
+    if (suspects.length>0) {
+      setDupReview({parsed:previewLista,num,nome:previewAcaoNome,suspects,decisions:suspects.map(()=>"merge")});
+    } else {
+      confirmarAcao(previewLista,num,previewAcaoNome,[]);
+    }
+  }, [previewLista, previewAcaoNum, previewAcaoNome, evtData]);
 
   const confirmarAcao = useCallback(async(parsed,num,nome,mergeDecisions)=>{
     try {
@@ -413,39 +442,42 @@ export default function App() {
   }, [evtData, audit, recarregarEvento, showToast]);
 
   const limparAcao = useCallback(async(acaoId)=>{
-    await deletarMarcacoesDaAcao(acaoId);
-    await recarregarEvento();
-    setEditingAcaoId(acaoId); setEditAcaoTexto("");
-    showToast("Marcações limpas. Submeta a nova lista.");
-  }, [recarregarEvento, showToast]);
+    // Carrega participantes atuais da ação para o preview de edição
+    const acao = evtData.acoes.find(a=>a.id===acaoId);
+    const participantesAtuais = evtData.divulgadoras
+      .filter(d => evtData.marcacoes[`${d.id}_${acaoId}`]==="OK")
+      .map((d,i) => ({nome:d.nome, instagram:d.instagram||"", _id:i, _divId:d.id}));
+    setEditAcaoPreview({acaoId, acaoNumero:acao?.numero, acaoNome:acao?.nome, lista:participantesAtuais});
+  }, [evtData]);
 
   const resubmitAcao = useCallback(async()=>{
-    if (!editingAcaoId||!editAcaoTexto.trim()){ showToast("Cole a nova lista","del"); return; }
-    const acao=evtData.acoes.find(a=>a.id===editingAcaoId); if(!acao) return;
-    const parsed=parseLista(editAcaoTexto); if(!parsed.length){ showToast("Nenhum nome","del"); return; }
+    if (!editAcaoPreview) return;
+    const {acaoId, acaoNumero, lista} = editAcaoPreview;
+    const validos = lista.filter(p=>p.nome.trim());
+    if (!validos.length){ showToast("Lista vazia","del"); return; }
     try {
-      await deletarMarcacoesDaAcao(editingAcaoId);
+      await deletarMarcacoesDaAcao(acaoId);
       const marcacoesNovas=[];
       const participantIds=new Set();
-      for (const p of parsed) {
+      for (const p of validos) {
         const pNorm=normStr(p.nome),ni=normInsta(p.instagram); let div=null;
         if(ni) div=evtData.divulgadoras.find(d=>normInsta(d.instagram)===ni);
         if(!div) div=evtData.divulgadoras.find(d=>normStr(d.nome)===pNorm);
-        if(!div) { div=await criarDivulgadora({evento_id:activeEventoId,nome:p.nome,instagram:p.instagram||"",entrada_acao:acao.numero}); }
+        if(!div) { div=await criarDivulgadora({evento_id:activeEventoId,nome:p.nome,instagram:p.instagram||"",entrada_acao:acaoNumero}); }
         participantIds.add(div.id);
-        marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:div.id,acao_id:editingAcaoId,valor:"OK"});
+        marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:div.id,acao_id:acaoId,valor:"OK"});
       }
       for (const d of evtData.divulgadoras) {
-        if (!participantIds.has(d.id)) marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:d.id,acao_id:editingAcaoId,valor:"X"});
+        if (!participantIds.has(d.id)) marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:d.id,acao_id:acaoId,valor:"X"});
       }
       await upsertMarcacoesBatch(marcacoesNovas);
-      await atualizarAcao(editingAcaoId,{total_participantes:parsed.length});
-      await audit("edit",`Ação ${acao.numero} reprocessada`,"Ações",`${parsed.length} participantes`);
+      await atualizarAcao(acaoId,{total_participantes:validos.length});
+      await audit("edit",`Ação ${acaoNumero} editada`,"Ações",`${validos.length} participantes`);
       await recarregarEvento();
-      setEditingAcaoId(null); setEditAcaoTexto("");
-      showToast(`✅ Ação ${acao.numero} reprocessada!`);
+      setEditAcaoPreview(null);
+      showToast(`✅ Ação ${acaoNumero} atualizada!`);
     } catch(e){ showToast("Erro ao reprocessar","del"); }
-  }, [editingAcaoId, editAcaoTexto, evtData, activeEventoId, audit, recarregarEvento, showToast]);
+  }, [editAcaoPreview, evtData, activeEventoId, audit, recarregarEvento, showToast]);
 
   // ── DIVULGADORAS ──────────────────────────────────────────────
   const salvarEditDiv = useCallback(async(divId)=>{
@@ -685,8 +717,20 @@ export default function App() {
       {toast&&<div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
       {loading&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{color:"#a78bfa",fontSize:14}}>Carregando...</div></div>}
 
+      {/* TOPBAR MOBILE */}
+      <div className="topbar">
+        <div className="topbar-brand">VSLT</div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {view===VIEWS.EVENTO&&evtInfo&&<span style={{fontSize:12,color:"#94a3b8",maxWidth:150,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{evtInfo.nome}</span>}
+          <button className="topbar-menu" onClick={()=>setMobileMenu(v=>!v)}>☰</button>
+        </div>
+      </div>
+
+      {/* OVERLAY MOBILE */}
+      <div className={`sidebar-overlay ${mobileMenu?"open":""}`} onClick={()=>setMobileMenu(false)}/>
+
       {/* SIDEBAR */}
-      <div className="sidebar">
+      <div className={`sidebar ${mobileMenu?"mobile-open":""}`}>
         <div className="sb-head">
           <div className="sb-brand">VSLT</div>
           <div className="sb-sub">Produções — v7 DB</div>
@@ -700,7 +744,7 @@ export default function App() {
             {key:VIEWS.AUDITORIA,icon:"🔍",label:"Auditoria",pill:auditLog.length,pillColor:"#ef4444"},
           ].map(item=>(
             <button key={item.key} className={`nb ${(view===item.key||(view===VIEWS.EVENTO&&item.key===VIEWS.HOME))?"active":""}`}
-              onClick={()=>{if(item.key===VIEWS.HOME){setView(VIEWS.HOME);}else setView(item.key);}}>
+              onClick={()=>{if(item.key===VIEWS.HOME){setView(VIEWS.HOME);}else setView(item.key);setMobileMenu(false);}}>
               <span className="nb-ic">{item.icon}</span>
               <span style={{flex:1}}>{item.label}</span>
               {item.pill>0&&<span className="nb-pill" style={item.pillColor?{background:`${item.pillColor}25`,color:item.pillColor}:{}}>{item.pill}</span>}
@@ -854,7 +898,46 @@ export default function App() {
 
             {/* IMPORTAR */}
             {evtTab==="importar"&&(
-              <div style={{maxWidth:640}}>
+              <div style={{maxWidth:680}}>
+
+                {/* MODAL PREVIEW */}
+                {previewLista&&(
+                  <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)"}}>
+                    <div style={{background:"#0d0d18",border:"1px solid rgba(139,92,246,.25)",borderRadius:22,padding:28,width:"92%",maxWidth:620,maxHeight:"88vh",display:"flex",flexDirection:"column",boxShadow:"0 30px 80px rgba(0,0,0,.6)"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                        <div>
+                          <div style={{fontSize:17,fontWeight:700,color:"#fff"}}>✅ Validar Lista — {previewAcaoNome}</div>
+                          <div style={{fontSize:12,color:"#64748b",marginTop:3}}>{previewLista.length} nome{previewLista.length!==1?"s":""} encontrado{previewLista.length!==1?"s":""} · Edite ou remova antes de importar</div>
+                        </div>
+                        <button onClick={()=>setPreviewLista(null)} style={{background:"rgba(255,255,255,.06)",border:"none",color:"#64748b",fontSize:20,cursor:"pointer",width:32,height:32,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 36px",gap:8,padding:"6px 10px",background:"rgba(255,255,255,.04)",borderRadius:8,marginBottom:6,fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:.8}}>
+                        <span>Nome</span><span>Instagram</span><span></span>
+                      </div>
+                      <div style={{overflowY:"auto",flex:1,marginBottom:14}}>
+                        {previewLista.map((p,i)=>(
+                          <div key={p._id} style={{display:"grid",gridTemplateColumns:"1fr 1fr 36px",gap:8,marginBottom:6,alignItems:"center"}}>
+                            <input value={p.nome} onChange={e=>{const c=[...previewLista];c[i]={...c[i],nome:e.target.value};setPreviewLista(c);}} style={{...inp,padding:"8px 12px",fontSize:13}} placeholder="Nome"/>
+                            <input value={p.instagram} onChange={e=>{const c=[...previewLista];c[i]={...c[i],instagram:e.target.value.replace(/^@/,"")};setPreviewLista(c);}} style={{...inp,padding:"8px 12px",fontSize:13,color:"#a78bfa"}} placeholder="instagram (sem @)"/>
+                            <button onClick={()=>setPreviewLista(previewLista.filter((_,j)=>j!==i))} style={{width:32,height:32,background:"rgba(239,68,68,.1)",border:"1px solid rgba(239,68,68,.2)",borderRadius:8,color:"#f87171",cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+                          </div>
+                        ))}
+                        {previewLista.length===0&&<div style={{textAlign:"center",padding:"24px 0",color:"#64748b",fontSize:13}}>Lista vazia</div>}
+                      </div>
+                      <button onClick={()=>setPreviewLista([...previewLista,{nome:"",instagram:"",_id:Date.now()}])} style={{background:"rgba(139,92,246,.08)",border:"1px dashed rgba(139,92,246,.3)",borderRadius:9,padding:"8px 14px",color:"#a78bfa",fontSize:13,cursor:"pointer",fontFamily:"inherit",marginBottom:14,width:"100%"}}>+ Adicionar linha</button>
+                      <div style={{display:"flex",gap:10,justifyContent:"space-between",alignItems:"center"}}>
+                        <span style={{fontSize:12,color:"#64748b"}}>{previewLista.filter(p=>p.nome.trim()).length} válido{previewLista.filter(p=>p.nome.trim()).length!==1?"s":""}</span>
+                        <div style={{display:"flex",gap:8}}>
+                          <button className="btn bg" onClick={()=>setPreviewLista(null)}>Cancelar</button>
+                          <button className="btn bp" onClick={confirmarPreview} disabled={!previewLista.filter(p=>p.nome.trim()).length}>
+                            Confirmar e Importar ({previewLista.filter(p=>p.nome.trim()).length})
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {!evtInfo.encerrado&&!editingAcaoId&&(
                   <div className="card" style={{marginBottom:14}}>
                     <div className="ct">📥 Importar Nova Ação</div>
@@ -865,25 +948,104 @@ export default function App() {
                       <Field label="Nº Ação" style={{flex:"0 0 110px"}}><input style={inp} type="number" value={acaoNum} onChange={e=>setAcaoNum(e.target.value)} placeholder={`${evtData.acoes.length+1}`}/></Field>
                       <Field label="Nome (opcional)" style={{flex:1}}><input style={inp} value={acaoNome} onChange={e=>setAcaoNome(e.target.value)} placeholder={`Ação ${acaoNum||evtData.acoes.length+1}`}/></Field>
                     </div>
-                    <Field label="Lista de participantes">
-                      <textarea style={{...inp,minHeight:140,fontFamily:"monospace",fontSize:13}} value={acaoTexto} onChange={e=>setAcaoTexto(e.target.value)} placeholder={"Cole a lista:\n1- Nome / @instagram\n2- Nome / @instagram"}/>
+                    <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:12}}>
+                      <label style={{display:"inline-flex",alignItems:"center",gap:8,padding:"9px 16px",background:"rgba(139,92,246,.1)",border:"1px solid rgba(139,92,246,.25)",borderRadius:9,color:"#a78bfa",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                        📄 Carregar arquivo .txt
+                        <input type="file" accept=".txt" onChange={lerArquivoTxt} style={{display:"none"}}/>
+                      </label>
+                      {acaoTexto&&<span style={{fontSize:12,color:"#34d399"}}>✓ {parseLista(acaoTexto).length} linha{parseLista(acaoTexto).length!==1?"s":""} detectada{parseLista(acaoTexto).length!==1?"s":""}</span>}
+                      {acaoTexto&&<button onClick={()=>setAcaoTexto("")} style={{background:"transparent",border:"none",color:"#64748b",cursor:"pointer",fontSize:13}}>limpar</button>}
+                    </div>
+                    <Field label="Ou cole a lista aqui">
+                      <textarea style={{...inp,minHeight:140,fontFamily:"monospace",fontSize:13}} value={acaoTexto} onChange={e=>setAcaoTexto(e.target.value)} placeholder={"Cole a lista:\n1- Nome / @instagram\n2- Nome / @instagram\n\nou carregue um arquivo .txt acima"}/>
                     </Field>
-                    <div style={{display:"flex",justifyContent:"flex-end"}}><button className="btn bp" onClick={processarAcao}>Processar Ação</button></div>
+                    <div style={{display:"flex",justifyContent:"flex-end"}}><button className="btn bp" onClick={processarAcao} disabled={!acaoTexto.trim()}>Validar Lista →</button></div>
                   </div>
                 )}
-                {editingAcaoId&&(()=>{
-                  const ea=evtData.acoes.find(a=>a.id===editingAcaoId);
-                  return(
-                    <div className="card" style={{marginBottom:14,border:"1px solid rgba(251,191,36,.3)"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-                        <div className="ct" style={{color:"#fbbf24",margin:0}}>✏️ Editando Ação {ea?.numero}</div>
-                        <button className="btn bg bsm" onClick={()=>{setEditingAcaoId(null);setEditAcaoTexto("");}}>Cancelar</button>
+                {/* MODAL EDIÇÃO DE AÇÃO */}
+                {editAcaoPreview&&(
+                  <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)"}}>
+                    <div style={{background:"#0d0d18",border:"1px solid rgba(251,191,36,.3)",borderRadius:22,padding:28,width:"92%",maxWidth:620,maxHeight:"88vh",display:"flex",flexDirection:"column",boxShadow:"0 30px 80px rgba(0,0,0,.6)"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                        <div>
+                          <div style={{fontSize:17,fontWeight:700,color:"#fbbf24"}}>✏️ Editando Ação #{editAcaoPreview.acaoNumero} — {editAcaoPreview.acaoNome}</div>
+                          <div style={{fontSize:12,color:"#64748b",marginTop:3}}>Edite, adicione ou remova participantes. As marcações serão recalculadas ao salvar.</div>
+                        </div>
+                        <button onClick={()=>setEditAcaoPreview(null)} style={{background:"rgba(255,255,255,.06)",border:"none",color:"#64748b",fontSize:20,cursor:"pointer",width:32,height:32,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
                       </div>
-                      <textarea style={{...inp,minHeight:140,fontFamily:"monospace",fontSize:13}} value={editAcaoTexto} onChange={e=>setEditAcaoTexto(e.target.value)} placeholder={"Nova lista:\n1- Nome / @instagram"}/>
-                      <div style={{display:"flex",justifyContent:"flex-end",marginTop:10}}><button className="btn bp" onClick={resubmitAcao}>Reprocessar</button></div>
+
+                      {/* Info sobre participantes atuais */}
+                      <div style={{background:"rgba(251,191,36,.06)",border:"1px solid rgba(251,191,36,.2)",borderRadius:9,padding:"8px 14px",fontSize:12,color:"#fbbf24",marginBottom:14}}>
+                        ⚠️ Lista atual de quem tem <strong>OK</strong> nesta ação. Ao salvar, as marcações serão substituídas.
+                      </div>
+
+                      {/* Cabeçalho */}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 36px",gap:8,padding:"6px 10px",background:"rgba(255,255,255,.04)",borderRadius:8,marginBottom:6,fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:.8}}>
+                        <span>Nome</span><span>Instagram</span><span></span>
+                      </div>
+
+                      {/* Lista editável */}
+                      <div style={{overflowY:"auto",flex:1,marginBottom:14}}>
+                        {editAcaoPreview.lista.map((p,i)=>(
+                          <div key={p._id} style={{display:"grid",gridTemplateColumns:"1fr 1fr 36px",gap:8,marginBottom:6,alignItems:"center"}}>
+                            <input
+                              value={p.nome}
+                              onChange={e=>{const c={...editAcaoPreview,lista:[...editAcaoPreview.lista]};c.lista[i]={...c.lista[i],nome:e.target.value};setEditAcaoPreview(c);}}
+                              style={{...inp,padding:"8px 12px",fontSize:13}}
+                              placeholder="Nome"
+                            />
+                            <input
+                              value={p.instagram}
+                              onChange={e=>{const c={...editAcaoPreview,lista:[...editAcaoPreview.lista]};c.lista[i]={...c.lista[i],instagram:e.target.value.replace(/^@/,"")};setEditAcaoPreview(c);}}
+                              style={{...inp,padding:"8px 12px",fontSize:13,color:"#a78bfa"}}
+                              placeholder="instagram (sem @)"
+                            />
+                            <button
+                              onClick={()=>setEditAcaoPreview({...editAcaoPreview,lista:editAcaoPreview.lista.filter((_,j)=>j!==i)})}
+                              style={{width:32,height:32,background:"rgba(239,68,68,.1)",border:"1px solid rgba(239,68,68,.2)",borderRadius:8,color:"#f87171",cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center"}}
+                            >✕</button>
+                          </div>
+                        ))}
+                        {editAcaoPreview.lista.length===0&&(
+                          <div style={{textAlign:"center",padding:"20px 0",color:"#64748b",fontSize:13}}>Lista vazia</div>
+                        )}
+                      </div>
+
+                      {/* Adicionar linha + upload TXT */}
+                      <div style={{display:"flex",gap:10,marginBottom:14}}>
+                        <button
+                          onClick={()=>setEditAcaoPreview({...editAcaoPreview,lista:[...editAcaoPreview.lista,{nome:"",instagram:"",_id:Date.now()}]})}
+                          style={{flex:1,background:"rgba(139,92,246,.08)",border:"1px dashed rgba(139,92,246,.3)",borderRadius:9,padding:"8px 14px",color:"#a78bfa",fontSize:13,cursor:"pointer",fontFamily:"inherit"}}
+                        >+ Adicionar linha</button>
+                        <label style={{display:"inline-flex",alignItems:"center",gap:7,padding:"8px 14px",background:"rgba(139,92,246,.08)",border:"1px solid rgba(139,92,246,.2)",borderRadius:9,color:"#a78bfa",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                          📄 Substituir por .txt
+                          <input type="file" accept=".txt" onChange={e=>{
+                            const file=e.target.files[0]; if(!file) return;
+                            const reader=new FileReader();
+                            reader.onload=(ev)=>{
+                              const parsed=parseLista(ev.target.result);
+                              if(!parsed.length){showToast("Nenhum nome encontrado no arquivo","del");return;}
+                              setEditAcaoPreview({...editAcaoPreview,lista:parsed.map((p,i)=>({...p,_id:i}))});
+                              showToast(`✅ ${parsed.length} nomes carregados do arquivo`);
+                            };
+                            reader.readAsText(file,"UTF-8");
+                            e.target.value="";
+                          }} style={{display:"none"}}/>
+                        </label>
+                      </div>
+
+                      <div style={{display:"flex",gap:10,justifyContent:"space-between",alignItems:"center"}}>
+                        <span style={{fontSize:12,color:"#64748b"}}>{editAcaoPreview.lista.filter(p=>p.nome.trim()).length} participante{editAcaoPreview.lista.filter(p=>p.nome.trim()).length!==1?"s":""} válido{editAcaoPreview.lista.filter(p=>p.nome.trim()).length!==1?"s":""}</span>
+                        <div style={{display:"flex",gap:8}}>
+                          <button className="btn bg" onClick={()=>setEditAcaoPreview(null)}>Cancelar</button>
+                          <button className="btn be" onClick={resubmitAcao} disabled={!editAcaoPreview.lista.filter(p=>p.nome.trim()).length}>
+                            Salvar Alterações ({editAcaoPreview.lista.filter(p=>p.nome.trim()).length})
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                  );
-                })()}
+                  </div>
+                )}
                 {evtData.acoes.length>0&&(
                   <div className="card">
                     <div className="ct">Ações Registradas</div>
@@ -1302,6 +1464,25 @@ export default function App() {
         )}
       </div>
 
+      {/* BOTTOM NAV MOBILE */}
+      <nav className="mobile-nav" style={{display:"none"}} id="mobileNav">
+        {[
+          {key:VIEWS.HOME,ic:"🏠",lb:"Eventos"},
+          {key:VIEWS.SORTEIO,ic:"🎲",lb:"Sorteio"},
+          {key:VIEWS.STATS,ic:"📈",lb:"Stats"},
+          {key:VIEWS.AUDITORIA,ic:"🔍",lb:"Audit"},
+        ].map(item=>(
+          <button key={item.key} className={`mobile-nav-btn ${(view===item.key||(view===VIEWS.EVENTO&&item.key===VIEWS.HOME))?"active":""}`}
+            onClick={()=>{if(item.key===VIEWS.HOME){setView(VIEWS.HOME);}else setView(item.key);}}>
+            <span className="mn-ic">{item.ic}</span>{item.lb}
+          </button>
+        ))}
+        <button className="mobile-nav-btn" onClick={()=>setMobileMenu(v=>!v)}>
+          <span className="mn-ic">☰</span>Menu
+        </button>
+      </nav>
+      <style>{`@media(max-width:768px){#mobileNav{display:flex!important}}`}</style>
+
       {/* MODALS */}
       <Modal open={editEvtModal} onClose={()=>setEditEvtModal(false)} title="✏️ Editar Evento">
         <Field label="Nome *"><input style={inp} value={editEvtNome} onChange={e=>setEditEvtNome(e.target.value)}/></Field>
@@ -1423,80 +1604,286 @@ export default function App() {
 }
 
 const GLOBAL_CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800;0,14..32,900&family=Space+Mono:wght@400;700&display=swap');
+
+/* ── RESET ── */
 *{box-sizing:border-box;margin:0;padding:0}
-::-webkit-scrollbar{width:4px;height:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#2a2a45;border-radius:4px}
-@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+html{scroll-behavior:smooth}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(139,92,246,.4);border-radius:4px}
+
+/* ── ANIMAÇÕES ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes spin{0%{transform:rotate(0) scale(1)}25%{transform:rotate(90deg) scale(1.2)}50%{transform:rotate(180deg) scale(1)}75%{transform:rotate(270deg) scale(1.2)}100%{transform:rotate(360deg) scale(1)}}
-.sidebar{width:240px;background:#0d0d18;border-right:1px solid #1c1c2e;position:fixed;top:0;left:0;bottom:0;z-index:100;display:flex;flex-direction:column}
-.sb-head{padding:26px 20px 20px;border-bottom:1px solid #1c1c2e}
-.sb-brand{font-size:21px;font-weight:800;letter-spacing:2px;background:linear-gradient(135deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.sb-sub{font-size:10px;color:#3d3d6b;text-transform:uppercase;letter-spacing:3px;margin-top:2px}
-.sb-nav{flex:1;padding:14px 10px;overflow-y:auto}
-.nb{display:flex;align-items:center;gap:12px;width:100%;padding:12px 14px;border:none;background:transparent;color:#64748b;font-size:14px;cursor:pointer;border-radius:12px;text-align:left;transition:all .2s;margin-bottom:3px;font-family:inherit;font-weight:500;position:relative}
-.nb:hover{color:#ccc;background:rgba(255,255,255,.04)}
-.nb.active{color:#fff;background:linear-gradient(135deg,rgba(139,92,246,.22),rgba(124,58,237,.12));border:1px solid rgba(139,92,246,.18)}
-.nb.active::before{content:'';position:absolute;left:0;top:25%;bottom:25%;width:3px;background:#8b5cf6;border-radius:0 3px 3px 0}
-.nb-ic{font-size:21px;width:28px;text-align:center;flex-shrink:0}
-.nb-pill{font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:rgba(139,92,246,.2);color:#a78bfa}
-.sb-sec{font-size:10px;color:#2a2a4a;font-weight:700;text-transform:uppercase;letter-spacing:2px;padding:12px 14px 5px}
-.eb{display:flex;align-items:center;gap:10px;width:100%;padding:9px 14px;border:none;background:transparent;color:#64748b;font-size:12px;cursor:pointer;border-radius:9px;text-align:left;transition:all .15s;font-family:inherit}
-.eb:hover{color:#bbb;background:rgba(255,255,255,.03)}.eb.active{color:#a78bfa;background:rgba(139,92,246,.08)}
-.edot{width:8px;height:8px;border-radius:50%;background:#10b981;flex-shrink:0}.edot.closed{background:#64748b}
-.sb-foot{padding:13px 10px;border-top:1px solid #1c1c2e}
-.urow{display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,.03);border-radius:10px}
-.uav{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;flex-shrink:0}
-.uname{font-size:13px;font-weight:600;flex:1}.urole{font-size:11px;color:#64748b}
-.uout{background:transparent;border:none;color:#64748b;cursor:pointer;font-size:18px;padding:4px;border-radius:6px;transition:color .2s}.uout:hover{color:#ef4444}
-.main{margin-left:240px;padding:30px 34px;min-height:100vh}
-.page-in{animation:fadeUp .25s}
-.ph{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:26px}
-.ph-t{font-size:25px;font-weight:800;color:#fff;letter-spacing:-.5px}.ph-s{font-size:13px;color:#64748b;margin-top:4px}
-.sg{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
-.sc{background:#12121f;border:1px solid #1c1c2e;border-radius:16px;padding:20px;transition:all .2s}
-.sc:hover{border-color:#252540;transform:translateY(-2px)}
-.sc-ic{font-size:30px;margin-bottom:10px;display:block}
-.sc-n{font-size:32px;font-weight:800;font-family:'Space Mono',monospace;letter-spacing:-1px}
-.sc-l{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1.5px;margin-top:4px}
-.card{background:#12121f;border:1px solid #1c1c2e;border-radius:16px;padding:20px;margin-bottom:14px}
-.ct{font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:14px}
-.tabs{display:flex;gap:2px;border-bottom:1px solid #1c1c2e;margin-bottom:22px;overflow-x:auto}
-.tab{display:flex;align-items:center;gap:7px;padding:12px 16px;border:none;background:transparent;color:#64748b;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;font-family:inherit;font-weight:500}
-.tab:hover{color:#bbb}.tab.active{color:#fff;border-bottom-color:#8b5cf6}
-.btn{display:inline-flex;align-items:center;gap:7px;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;border:none;font-family:inherit;white-space:nowrap}
-.bp{background:linear-gradient(135deg,#8b5cf6,#7c3aed);color:#fff}.bp:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 6px 20px rgba(139,92,246,.35)}.bp:disabled{opacity:.5;cursor:not-allowed}
-.bg{background:transparent;border:1px solid #1c1c2e;color:#64748b}.bg:hover{border-color:#252540;color:#e2e8f0}
-.bd{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);color:#f87171}.bd:hover{background:rgba(239,68,68,.14)}
-.bs{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);color:#34d399}
-.be{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);color:#fbbf24}.be:hover{background:rgba(245,158,11,.14)}
-.bsm{padding:6px 13px;font-size:12px;border-radius:8px}
-.badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600}
-.bpu{background:rgba(139,92,246,.15);color:#a78bfa}.bgr{background:rgba(16,185,129,.15);color:#34d399}
-.br{background:rgba(239,68,68,.15);color:#f87171}.by{background:rgba(245,158,11,.15);color:#fbbf24}.bbl{background:rgba(59,130,246,.15);color:#60a5fa}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+@keyframes glow-pulse{0%,100%{box-shadow:0 0 20px rgba(139,92,246,.2),0 0 40px rgba(139,92,246,.05)}50%{box-shadow:0 0 30px rgba(139,92,246,.4),0 0 60px rgba(139,92,246,.15)}}
+@keyframes slide-in-right{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+@keyframes bounce-in{0%{transform:scale(.8);opacity:0}60%{transform:scale(1.05)}100%{transform:scale(1);opacity:1}}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+
+/* ── SIDEBAR DESKTOP ── */
+.sidebar{
+  width:252px;
+  background:linear-gradient(180deg,#080812 0%,#0a0a18 100%);
+  border-right:1px solid rgba(139,92,246,.12);
+  position:fixed;top:0;left:0;bottom:0;z-index:200;
+  display:flex;flex-direction:column;
+  transition:transform .3s cubic-bezier(.4,0,.2,1);
+}
+.sidebar::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:200px;
+  background:radial-gradient(ellipse at 50% 0%,rgba(139,92,246,.18),transparent 70%);
+  pointer-events:none;
+}
+.sb-head{padding:28px 20px 22px;border-bottom:1px solid rgba(139,92,246,.1);position:relative}
+.sb-brand{
+  font-size:22px;font-weight:900;letter-spacing:3px;
+  background:linear-gradient(135deg,#c084fc,#a855f7,#7c3aed);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  filter:drop-shadow(0 0 12px rgba(168,85,247,.4));
+}
+.sb-sub{font-size:9px;color:rgba(139,92,246,.5);text-transform:uppercase;letter-spacing:4px;margin-top:3px}
+.sb-nav{flex:1;padding:14px 10px;overflow-y:auto;overflow-x:hidden}
+.nb{
+  display:flex;align-items:center;gap:12px;width:100%;
+  padding:13px 14px;border:none;background:transparent;
+  color:#64748b;font-size:14px;cursor:pointer;border-radius:12px;
+  text-align:left;transition:all .2s cubic-bezier(.4,0,.2,1);
+  margin-bottom:2px;font-family:inherit;font-weight:500;position:relative;
+  overflow:hidden;
+}
+.nb::after{content:'';position:absolute;inset:0;opacity:0;background:linear-gradient(135deg,rgba(139,92,246,.15),rgba(124,58,237,.08));transition:opacity .2s;border-radius:12px}
+.nb:hover{color:#cbd5e1;background:rgba(255,255,255,.04)}
+.nb:hover::after{opacity:1}
+.nb.active{color:#fff;background:linear-gradient(135deg,rgba(139,92,246,.25),rgba(124,58,237,.15));border:1px solid rgba(139,92,246,.25);box-shadow:0 4px 20px rgba(139,92,246,.15)}
+.nb.active::before{content:'';position:absolute;left:0;top:20%;bottom:20%;width:3px;background:linear-gradient(180deg,#c084fc,#7c3aed);border-radius:0 3px 3px 0;box-shadow:0 0 8px rgba(139,92,246,.8)}
+.nb-ic{font-size:20px;width:26px;text-align:center;flex-shrink:0;transition:transform .2s}
+.nb:hover .nb-ic{transform:scale(1.15)}
+.nb-pill{font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;background:rgba(139,92,246,.25);color:#c084fc;letter-spacing:.3px;box-shadow:0 0 10px rgba(139,92,246,.3)}
+.nb-pill-red{font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;background:rgba(239,68,68,.2);color:#f87171;letter-spacing:.3px}
+.sb-sec{font-size:9px;color:rgba(100,116,139,.5);font-weight:800;text-transform:uppercase;letter-spacing:2.5px;padding:14px 14px 5px}
+.eb{display:flex;align-items:center;gap:10px;width:100%;padding:9px 14px;border:none;background:transparent;color:#475569;font-size:12px;cursor:pointer;border-radius:9px;text-align:left;transition:all .15s;font-family:inherit;font-weight:500}
+.eb:hover{color:#94a3b8;background:rgba(255,255,255,.04)}
+.eb.active{color:#c084fc;background:rgba(139,92,246,.1);box-shadow:inset 0 0 0 1px rgba(139,92,246,.2)}
+.edot{width:7px;height:7px;border-radius:50%;background:#10b981;flex-shrink:0;box-shadow:0 0 6px #10b981}
+.edot.closed{background:#475569;box-shadow:none}
+.sb-foot{padding:14px 10px;border-top:1px solid rgba(139,92,246,.08)}
+.urow{display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,.03);border-radius:12px;border:1px solid rgba(139,92,246,.08)}
+.uav{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#fff;flex-shrink:0;box-shadow:0 0 15px rgba(139,92,246,.4)}
+.uname{font-size:13px;font-weight:700;flex:1;color:#e2e8f0}
+.urole{font-size:10px;color:#64748b;margin-top:1px}
+.uout{background:transparent;border:none;color:#475569;cursor:pointer;font-size:18px;padding:5px;border-radius:8px;transition:all .2s}
+.uout:hover{color:#f87171;background:rgba(239,68,68,.1)}
+
+/* ── MAIN DESKTOP ── */
+.main{margin-left:252px;padding:32px 36px;min-height:100vh;background:radial-gradient(ellipse 80% 50% at 20% -10%,rgba(139,92,246,.06),transparent),radial-gradient(ellipse 60% 40% at 80% 100%,rgba(56,189,248,.04),transparent),#07070e}
+.page-in{animation:fadeUp .3s cubic-bezier(.4,0,.2,1)}
+
+/* ── TOPBAR MOBILE ── */
+.topbar{display:none;align-items:center;justify-content:space-between;padding:14px 18px;background:rgba(8,8,18,.95);border-bottom:1px solid rgba(139,92,246,.12);position:sticky;top:0;z-index:150;backdrop-filter:blur(12px)}
+.topbar-brand{font-size:18px;font-weight:900;letter-spacing:2px;background:linear-gradient(135deg,#c084fc,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.topbar-menu{background:transparent;border:none;color:#94a3b8;font-size:22px;cursor:pointer;padding:4px 8px;border-radius:8px;line-height:1}
+.topbar-menu:hover{background:rgba(139,92,246,.1);color:#c084fc}
+
+/* ── MOBILE DRAWER ── */
+.sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:190;backdrop-filter:blur(4px)}
+.sidebar-overlay.open{display:block;animation:fadeIn .2s}
+
+/* ── PAGE HEADER ── */
+.ph{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px;flex-wrap:wrap;gap:12px}
+.ph-t{font-size:26px;font-weight:900;color:#fff;letter-spacing:-.8px;background:linear-gradient(135deg,#f1f5f9,#e2e8f0);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.ph-s{font-size:13px;color:#64748b;margin-top:4px}
+
+/* ── STAT GRID ── */
+.sg{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.sc{
+  background:linear-gradient(135deg,#12121f,#0f0f1c);
+  border:1px solid rgba(255,255,255,.06);
+  border-radius:20px;padding:22px 18px;
+  transition:all .25s cubic-bezier(.4,0,.2,1);
+  position:relative;overflow:hidden;cursor:default;
+}
+.sc::before{content:'';position:absolute;top:-50%;right:-30%;width:120px;height:120px;border-radius:50%;opacity:.06;transition:opacity .3s}
+.sc:hover{transform:translateY(-4px);border-color:rgba(139,92,246,.3);box-shadow:0 12px 40px rgba(0,0,0,.4),0 0 0 1px rgba(139,92,246,.1)}
+.sc:hover::before{opacity:.12}
+.sc-ic{font-size:28px;margin-bottom:12px;display:block;animation:float 3s ease-in-out infinite}
+.sc-n{font-size:30px;font-weight:900;font-family:'Space Mono',monospace;letter-spacing:-1.5px}
+.sc-l{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:2px;margin-top:5px;font-weight:600}
+.sc-tr{font-size:11px;margin-top:6px;font-weight:500}
+
+/* ── CARDS ── */
+.card{
+  background:linear-gradient(135deg,rgba(18,18,31,1),rgba(15,15,28,1));
+  border:1px solid rgba(255,255,255,.06);
+  border-radius:20px;padding:22px;margin-bottom:16px;
+  transition:border-color .2s;
+  position:relative;overflow:hidden;
+}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(139,92,246,.3),transparent)}
+.ct{font-size:11px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:16px}
+
+/* ── TABS ── */
+.tabs{display:flex;gap:0;border-bottom:1px solid rgba(255,255,255,.06);margin-bottom:24px;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{display:flex;align-items:center;gap:7px;padding:12px 18px;border:none;background:transparent;color:#64748b;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap;font-family:inherit;font-weight:600;position:relative}
+.tab:hover{color:#94a3b8;background:rgba(255,255,255,.02)}
+.tab.active{color:#c084fc;border-bottom-color:#a855f7}
+.tab.active::after{content:'';position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);width:60%;height:2px;background:linear-gradient(90deg,transparent,rgba(168,85,247,.6),transparent);border-radius:2px}
+
+/* ── BOTÕES ── */
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);border:none;font-family:inherit;white-space:nowrap;position:relative;overflow:hidden}
+.bp{background:linear-gradient(135deg,#a855f7,#7c3aed);color:#fff;box-shadow:0 4px 15px rgba(139,92,246,.3)}
+.bp:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 8px 25px rgba(139,92,246,.5)}
+.bp:active:not(:disabled){transform:translateY(0)}
+.bp:disabled{opacity:.4;cursor:not-allowed;box-shadow:none}
+.bg{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);color:#94a3b8}
+.bg:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.18);color:#e2e8f0}
+.bd{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);color:#f87171}
+.bd:hover{background:rgba(239,68,68,.15);box-shadow:0 4px 12px rgba(239,68,68,.2)}
+.bs{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.25);color:#34d399}
+.bs:hover{background:rgba(16,185,129,.15);box-shadow:0 4px 12px rgba(16,185,129,.2)}
+.be{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);color:#fbbf24}
+.be:hover{background:rgba(245,158,11,.15);box-shadow:0 4px 12px rgba(245,158,11,.2)}
+.bsm{padding:7px 14px;font-size:12px;border-radius:9px}
+
+/* ── BADGES ── */
+.badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.3px}
+.bpu{background:rgba(168,85,247,.15);color:#c084fc;box-shadow:0 0 10px rgba(168,85,247,.15)}
+.bgr{background:rgba(16,185,129,.12);color:#34d399;box-shadow:0 0 10px rgba(16,185,129,.12)}
+.br{background:rgba(239,68,68,.12);color:#f87171}
+.by{background:rgba(245,158,11,.12);color:#fbbf24}
+.bbl{background:rgba(56,189,248,.12);color:#38bdf8}
+
+/* ── TABELA ── */
 .tbl{width:100%;border-collapse:collapse}
-.tbl th{padding:10px 13px;text-align:left;color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #1c1c2e;font-weight:600}
-.tbl td{padding:10px 13px;border-bottom:1px solid rgba(255,255,255,.04)}
-.tbl tr:hover td{background:rgba(255,255,255,.02)}
-.cell-ok{color:#34d399;font-weight:700;text-align:center}.cell-x{color:#f87171;font-weight:700;text-align:center}
-.tbl-wrap{overflow:auto;border:1px solid #1c1c2e;border-radius:14px;max-height:380px}
-.rr{display:flex;align-items:center;gap:12px;padding:11px 13px;background:#0d0d18;border:1px solid #1c1c2e;border-radius:12px;margin-bottom:5px;transition:all .15s}
-.rr:hover{border-color:#252540;transform:translateX(3px)}
-.rpos{font-size:15px;font-weight:700;width:30px;text-align:center}
-.prog{height:6px;background:#1a1a2e;border-radius:4px;overflow:hidden}
-.pf{height:100%;border-radius:4px;background:linear-gradient(90deg,#8b5cf6,#34d399);transition:width .6s}
-.pc{background:#12121f;border:1px solid #1c1c2e;border-radius:16px;padding:20px;margin-bottom:14px;transition:border-color .2s}
-.pc:hover{border-color:#252540}
-.evt-card{background:#12121f;border:1px solid #1c1c2e;border-radius:16px;padding:20px;cursor:pointer;transition:all .2s}
-.evt-card:hover{border-color:rgba(139,92,246,.4);transform:translateY(-2px)}
-.g2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.empty{text-align:center;padding:60px 20px;color:#64748b}
-.edit-input{background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.4);border-radius:7px;padding:6px 10px;color:#e2e8f0;font-size:13px;outline:none;font-family:inherit;width:100%}
-.af-btn{padding:6px 14px;border-radius:20px;border:1px solid #1c1c2e;background:transparent;color:#64748b;font-size:12px;cursor:pointer;transition:all .15s;font-family:inherit}
-.af-btn:hover{border-color:#252540;color:#e2e8f0}.af-btn.active{background:rgba(139,92,246,.15);border-color:rgba(139,92,246,.4);color:#a78bfa}
-.toast{position:fixed;bottom:26px;right:26px;padding:13px 20px;border-radius:13px;font-size:14px;font-weight:600;z-index:9999;animation:fadeUp .3s;box-shadow:0 8px 24px rgba(0,0,0,.3);color:#fff}
-.toast-ok{background:linear-gradient(135deg,#10b981,#059669)}
-.toast-edit{background:linear-gradient(135deg,#f59e0b,#d97706)}
-.toast-del{background:linear-gradient(135deg,#ef4444,#b91c1c)}
+.tbl th{padding:11px 14px;text-align:left;color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid rgba(255,255,255,.06);font-weight:700}
+.tbl td{padding:11px 14px;border-bottom:1px solid rgba(255,255,255,.03)}
+.tbl tr:hover td{background:rgba(139,92,246,.04)}
+.cell-ok{color:#34d399;font-weight:800;text-align:center;text-shadow:0 0 10px rgba(52,211,153,.5)}
+.cell-x{color:#f87171;font-weight:700;text-align:center}
+.tbl-wrap{overflow:auto;border:1px solid rgba(255,255,255,.06);border-radius:16px;max-height:400px}
+
+/* ── RANK ROWS ── */
+.rr{display:flex;align-items:center;gap:12px;padding:12px 14px;background:rgba(10,10,20,.8);border:1px solid rgba(255,255,255,.05);border-radius:14px;margin-bottom:6px;transition:all .2s}
+.rr:hover{border-color:rgba(139,92,246,.3);background:rgba(139,92,246,.06);transform:translateX(4px);box-shadow:0 4px 16px rgba(139,92,246,.1)}
+.rpos{font-size:15px;font-weight:800;width:30px;text-align:center}
+
+/* ── PROGRESS ── */
+.prog{height:6px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden}
+.pf{height:100%;border-radius:4px;background:linear-gradient(90deg,#a855f7,#38bdf8,#34d399);background-size:200% 100%;animation:shimmer 3s linear infinite;transition:width .8s cubic-bezier(.4,0,.2,1)}
+
+/* ── EVENTO CARD ── */
+.evt-card{
+  background:linear-gradient(135deg,#12121f,#0f0f1c);
+  border:1px solid rgba(255,255,255,.07);
+  border-radius:20px;padding:22px;
+  cursor:pointer;transition:all .25s cubic-bezier(.4,0,.2,1);
+  position:relative;overflow:hidden;
+}
+.evt-card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(139,92,246,.08),transparent);opacity:0;transition:opacity .3s}
+.evt-card:hover{border-color:rgba(168,85,247,.4);transform:translateY(-4px);box-shadow:0 16px 48px rgba(0,0,0,.5),0 0 0 1px rgba(139,92,246,.15)}
+.evt-card:hover::before{opacity:1}
+
+/* ── PROMOTER CARD ── */
+.pc{background:linear-gradient(135deg,#12121f,#0f0f1c);border:1px solid rgba(255,255,255,.06);border-radius:20px;padding:22px;margin-bottom:16px;transition:all .2s}
+.pc:hover{border-color:rgba(139,92,246,.25);box-shadow:0 8px 30px rgba(0,0,0,.3)}
+
+/* ── MISC ── */
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.empty{text-align:center;padding:64px 20px;color:#475569}
+.edit-input{background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.35);border-radius:8px;padding:7px 11px;color:#e2e8f0;font-size:13px;outline:none;font-family:inherit;width:100%;transition:border-color .2s}
+.edit-input:focus{border-color:#a855f7;box-shadow:0 0 0 3px rgba(139,92,246,.15)}
+.af-btn{padding:7px 16px;border-radius:20px;border:1px solid rgba(255,255,255,.08);background:transparent;color:#64748b;font-size:12px;cursor:pointer;transition:all .15s;font-family:inherit;font-weight:600}
+.af-btn:hover{border-color:rgba(255,255,255,.2);color:#e2e8f0;background:rgba(255,255,255,.04)}
+.af-btn.active{background:rgba(168,85,247,.15);border-color:rgba(168,85,247,.4);color:#c084fc;box-shadow:0 0 12px rgba(168,85,247,.2)}
+
+/* ── TOAST ── */
+.toast{position:fixed;bottom:28px;right:28px;padding:14px 22px;border-radius:14px;font-size:14px;font-weight:700;z-index:9999;animation:bounce-in .4s cubic-bezier(.4,0,.2,1);box-shadow:0 12px 40px rgba(0,0,0,.4);color:#fff;max-width:320px}
+.toast-ok{background:linear-gradient(135deg,#059669,#10b981);box-shadow:0 12px 40px rgba(16,185,129,.3)}
+.toast-edit{background:linear-gradient(135deg,#d97706,#f59e0b);box-shadow:0 12px 40px rgba(245,158,11,.3)}
+.toast-del{background:linear-gradient(135deg,#b91c1c,#ef4444);box-shadow:0 12px 40px rgba(239,68,68,.3)}
+
+/* ── MISC ── */
 details summary::-webkit-details-marker{display:none}details>summary{list-style:none}
+
+/* ════════════════════════════════
+   RESPONSIVIDADE MOBILE
+   ════════════════════════════════ */
+@media(max-width:768px){
+  /* Sidebar vira drawer */
+  .sidebar{transform:translateX(-100%);width:280px;z-index:300;box-shadow:4px 0 40px rgba(0,0,0,.8)}
+  .sidebar.mobile-open{transform:translateX(0)}
+
+  /* Topbar aparece */
+  .topbar{display:flex}
+
+  /* Main ocupa tela toda */
+  .main{margin-left:0;padding:16px;padding-bottom:80px}
+
+  /* Títulos menores */
+  .ph-t{font-size:20px}
+  .ph{margin-bottom:18px}
+
+  /* Stats em 2 colunas */
+  .sg{grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:16px}
+  .sc{padding:16px 14px;border-radius:16px}
+  .sc-n{font-size:24px}
+  .sc-ic{font-size:22px;margin-bottom:8px}
+
+  /* Grid 2 vira 1 coluna */
+  .g2{grid-template-columns:1fr;gap:12px}
+
+  /* Tabs com scroll */
+  .tabs{margin-bottom:16px;padding-bottom:0}
+  .tab{padding:10px 14px;font-size:12px}
+
+  /* Cards mais compactos */
+  .card{padding:16px;border-radius:16px;margin-bottom:12px}
+
+  /* Botões maiores no mobile (touch) */
+  .btn{padding:12px 18px;font-size:14px;border-radius:12px}
+  .bsm{padding:10px 14px;font-size:13px}
+
+  /* Tabela scroll horizontal */
+  .tbl-wrap{max-height:none}
+  .tbl th,.tbl td{padding:9px 10px;font-size:12px}
+
+  /* Rank rows */
+  .rr{padding:10px 12px;border-radius:12px}
+
+  /* Toast centralizado embaixo */
+  .toast{bottom:16px;right:16px;left:16px;text-align:center;border-radius:12px;font-size:13px}
+
+  /* Evento header */
+  .evt-card{padding:18px;border-radius:16px}
+
+  /* Nav mobile bottom bar - ícones rápidos */
+  .mobile-nav{
+    display:flex;position:fixed;bottom:0;left:0;right:0;
+    background:rgba(8,8,18,.97);border-top:1px solid rgba(139,92,246,.15);
+    padding:8px 0 max(8px,env(safe-area-inset-bottom));
+    z-index:180;backdrop-filter:blur(16px);
+  }
+  .mobile-nav-btn{
+    flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
+    padding:6px 4px;border:none;background:transparent;cursor:pointer;
+    color:#64748b;font-size:10px;font-weight:600;font-family:inherit;
+    transition:color .15s;
+  }
+  .mobile-nav-btn .mn-ic{font-size:22px;line-height:1;transition:transform .15s}
+  .mobile-nav-btn.active{color:#c084fc}
+  .mobile-nav-btn.active .mn-ic{transform:scale(1.15)}
+  .mobile-nav-btn:hover{color:#94a3b8}
+}
+
+/* ── Telas bem pequenas ── */
+@media(max-width:380px){
+  .sg{grid-template-columns:repeat(2,1fr);gap:8px}
+  .sc-n{font-size:20px}
+  .main{padding:12px;padding-bottom:80px}
+  .card{padding:14px}
+}
 `;
