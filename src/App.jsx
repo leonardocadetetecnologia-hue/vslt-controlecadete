@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
-  supabase,
   loginUsuario, listarUsuarios,
-  listarEventos, criarEvento as dbCriarEvento, atualizarEvento, deletarEvento as dbDeletarEvento,
+  listarEventos, buscarEvento, criarEvento as dbCriarEvento, atualizarEvento, deletarEvento as dbDeletarEvento,
   encerrarEvento as dbEncerrarEvento, reabrirEvento as dbReabrirEvento, salvarCondicoes,
   listarMetas, salvarMetas as dbSalvarMetas,
   listarAcoes, criarAcao, atualizarAcao, deletarAcao,
@@ -248,8 +247,7 @@ export default function App() {
   const abrirEvento = useCallback(async (id) => {
     setLoading(true);
     try {
-      const evtInfoData = await atualizarEvento(id, {}); // apenas busca
-      const { data: evtRow } = await supabase.from("eventos").select("*").eq("id",id).single();
+      const evtRow = await buscarEvento(id);
       const loaded = await carregarEvento(id);
       setEvtInfo(evtRow);
       setEvtData(loaded);
@@ -265,7 +263,7 @@ export default function App() {
   const recarregarEvento = useCallback(async () => {
     if (!activeEventoId) return;
     const [evtRow, loaded] = await Promise.all([
-      supabase.from("eventos").select("*").eq("id",activeEventoId).single().then(r=>r.data),
+      buscarEvento(activeEventoId),
       carregarEvento(activeEventoId),
     ]);
     setEvtInfo(evtRow);
