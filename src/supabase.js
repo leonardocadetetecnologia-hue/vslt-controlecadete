@@ -229,12 +229,15 @@ export async function upsertMarcacao({ evento_id, divulgadora_id, acao_id, valor
 }
 
 export async function upsertMarcacoesBatch(marcacoes) {
-  // marcacoes = [{ evento_id, divulgadora_id, acao_id, valor }]
   if (!marcacoes.length) return;
-  const { error } = await supabase
-    .from("marcacoes")
-    .upsert(marcacoes, { onConflict: "divulgadora_id,acao_id" });
-  if (error) throw error;
+  const BATCH = 50;
+  for (let i = 0; i < marcacoes.length; i += BATCH) {
+    const lote = marcacoes.slice(i, i + BATCH);
+    const { error } = await supabase
+      .from("marcacoes")
+      .upsert(lote, { onConflict: "divulgadora_id,acao_id", ignoreDuplicates: false });
+    if (error) throw error;
+  }
 }
 
 export async function deletarMarcacoesDaAcao(acao_id) {
