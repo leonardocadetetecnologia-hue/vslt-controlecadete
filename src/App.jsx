@@ -13,12 +13,31 @@ import {
   listarAuditLog, inserirAuditLog, limparAuditLog,
   carregarEvento,
 } from "./supabase";
+import {
+  buildConferenceRows,
+  buildEmailImportPreview,
+  downloadBlob,
+  generateConferenceWorkbook,
+  getStoredEmailMap,
+} from "./conference";
 
 // ── HELPERS ──────────────────────────────────────────────────
 const fmtCur = (v) => Number(v || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 const fmtShort = (ts) => new Date(ts).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 const CATS = ["Promoter", "Divulgadora", "Bday"];
 const VIEWS = { HOME: "home", EVENTO: "evento", CRIAR: "criar", SORTEIO: "sorteio", STATS: "stats", RELATORIOS: "relatorios", AUDITORIA: "auditoria" };
+const LIST_SKIP_PATTERNS = [
+  /https?:\/\//i,
+  /curtir/i,
+  /marcar\s+\d+/i,
+  /respostar/i,
+  /story/i,
+  /colocar o link/i,
+  /o post abaixo/i,
+  /complete a lista/i,
+  /nome completo/i,
+  /follow the sun/i,
+];
 
 // ── SIMILARITY ───────────────────────────────────────────────
 function levenshtein(a, b) {
@@ -33,6 +52,15 @@ function levenshtein(a, b) {
 }
 const normStr = (s) => (s||"").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\s+/g," ");
 const normInsta = (s) => (s||"").trim().toLowerCase().replace(/^@/,"").replace(/\s/g,"");
+const getAcaoNumero = (acao) => {
+  const n = Number(acao?.numero);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+const getEntradaAcao = (divulgadora) => {
+  const n = Number(divulgadora?.entrada_acao);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+};
+const isMarkedStatus = (value) => value === "OK" || value === "X";
 const similarity = (a,b) => { const na=normStr(a),nb=normStr(b); if(!na||!nb) return 0; if(na===nb) return 1; return 1-levenshtein(na,nb)/Math.max(na.length,nb.length); };
 function findDuplicates(newEntries, existing, threshold=0.78) {
   const suspects = [];
@@ -51,10 +79,23 @@ function findDuplicates(newEntries, existing, threshold=0.78) {
 
 // ── PARSER ───────────────────────────────────────────────────
 function parseLista(text) {
-  const lines = text.split("\n").filter(l=>l.trim());
+  const lines = text.split(/\r?\n/).map((line) => line.replace(/\u200b/g, "").trim()).filter(Boolean);
   const results = [];
+  const isStandaloneInstagram = (line) => /^@?[a-zA-Z0-9_.]+$/.test(line.trim());
+  const isListItem = (line) => /^\d+\s*[-_.:)\]]*/.test(line.trim());
+  const shouldSkipLine = (line) => {
+    const atCount = (line.match(/@/g) || []).length;
+    return atCount > 1 || LIST_SKIP_PATTERNS.some((pattern) => pattern.test(line));
+  };
   for (const line of lines) {
-    const cleaned = line.replace(/^\d+[\s\-.\)]*/,"").trim();
+    if (shouldSkipLine(line)) continue;
+    if (isStandaloneInstagram(line) && results.length && !results[results.length - 1].instagram) {
+      results[results.length - 1].instagram = line.replace(/^@/,"").toLowerCase();
+      if (!results[results.length - 1].nome) results[results.length - 1].nome = results[results.length - 1].instagram;
+      continue;
+    }
+    if (!isListItem(line)) continue;
+    const cleaned = line.replace(/^\d+[\s\-_.:)\]]*/,"").replace(/^\*+|\*+$/g,"").trim();
     if (!cleaned) continue;
     let nome="",insta="";
     const instaMatch = cleaned.match(/@([a-zA-Z0-9_.]+)/);
@@ -91,6 +132,11 @@ function Modal({open,onClose,title,children,width=500}) {
 }
 const mbs={position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)"};
 const mbox={background:"#0d0d18",border:"1px solid rgba(139,92,246,.2)",borderRadius:22,padding:28,width:"92%",maxHeight:"88vh",overflowY:"auto",boxShadow:"0 30px 80px rgba(0,0,0,.6)"};
+const conferenceCellStyle = (value) => value === "OK"
+  ? { background: "rgba(34,197,94,.15)", color: "#34d399", fontWeight: 800, textAlign: "center" }
+  : value === "X"
+    ? { background: "rgba(248,113,113,.15)", color: "#f87171", fontWeight: 800, textAlign: "center" }
+    : { textAlign: "center", color: "#64748b" };
 
 function Field({label,children,style}) {
   return (
@@ -156,6 +202,9 @@ export default function App() {
   const [previewAcaoNome, setPreviewAcaoNome] = useState("");
   // Edição segura de ação (sem apagar banco antes de confirmar)
   const [editAcaoPreview, setEditAcaoPreview] = useState(null); // {acaoId, acaoNumero, lista:[]}
+  const [emailImportText, setEmailImportText] = useState("");
+  const [emailImportPreview, setEmailImportPreview] = useState(null);
+  const [generatingConference, setGeneratingConference] = useState(false);
 
   // Modais
   const [editEvtModal, setEditEvtModal] = useState(false);
@@ -272,27 +321,81 @@ export default function App() {
 
   // ── CALC STATS ───────────────────────────────────────────────
   const calcStats = useCallback((divulgadoras, acoes, marcacoes) => {
-    if (!divulgadoras?.length||!acoes?.length) return {ranking:[],avg:0,topCount:0,acaoStats:[]};
-    const totalAcoes = acoes.length;
-    const ranking = divulgadoras.map(d=>{
-      let ok=0;
-      for (const a of acoes) if (marcacoes[`${d.id}_${a.id}`]==="OK") ok++;
-      return {...d,ok,total:totalAcoes,pct:(ok/totalAcoes)*100};
-    }).sort((a,b)=>b.pct-a.pct||b.ok-a.ok);
-    const avg = ranking.length ? ranking.reduce((s,r)=>s+r.pct,0)/ranking.length : 0;
-    const topCount = ranking.filter(r=>r.pct===100).length;
-    const acaoStats = acoes.map(a=>{
-      let ok=0,t=0;
-      for (const d of divulgadoras) { const k=`${d.id}_${a.id}`; if(marcacoes[k]){t++;if(marcacoes[k]==="OK")ok++;} }
-      return {...a,ok,total:t};
+    if (!divulgadoras?.length||!acoes?.length) {
+      return {ranking:[],avg:0,topCount:0,acaoStats:[],usedActions:[],usedActionCount:0};
+    }
+
+    const acoesOrdenadas = [...acoes].sort((a,b)=>getAcaoNumero(a)-getAcaoNumero(b));
+    const acaoStats = acoesOrdenadas.map((acao)=>{
+      const numero = getAcaoNumero(acao);
+      let ok=0, x=0, total=0, eligible=0;
+
+      for (const divulgadora of divulgadoras) {
+        if (numero < getEntradaAcao(divulgadora)) continue;
+        eligible++;
+
+        const value = marcacoes[`${divulgadora.id}_${acao.id}`];
+        if (!isMarkedStatus(value)) continue;
+        total++;
+        if (value === "OK") ok++;
+        else x++;
+      }
+
+      return {
+        ...acao,
+        numero,
+        ok,
+        x,
+        total,
+        eligible,
+        missing: Math.max(eligible - total, 0),
+        reliable: ok > 0,
+        pct: total ? (ok / total) * 100 : 0,
+      };
     });
-    return {ranking,avg,topCount,acaoStats};
+
+    const usedActions = acaoStats.filter((acao)=>acao.reliable);
+    const ranking = divulgadoras.map((divulgadora)=>{
+      let ok=0, total=0;
+      for (const acao of usedActions) {
+        if (acao.numero < getEntradaAcao(divulgadora)) {
+          total++;
+          continue;
+        }
+        const value = marcacoes[`${divulgadora.id}_${acao.id}`];
+        if (!isMarkedStatus(value)) continue;
+        total++;
+        if (value === "OK") ok++;
+      }
+      return {...divulgadora,ok,total,pct:total?(ok/total)*100:0};
+    }).sort((a,b)=>b.pct-a.pct||b.ok-a.ok||a.nome.localeCompare(b.nome,"pt-BR"));
+
+    const rankingComDados = ranking.filter((item)=>item.total > 0);
+    const avg = rankingComDados.length ? rankingComDados.reduce((s,r)=>s+r.pct,0)/rankingComDados.length : 0;
+    const topCount = rankingComDados.filter(r=>r.pct===100).length;
+    return {ranking,avg,topCount,acaoStats,usedActions,usedActionCount:usedActions.length};
   }, []);
 
   const stats = useMemo(()=>{
     if (!evtData) return null;
     return calcStats(evtData.divulgadoras, evtData.acoes, evtData.marcacoes);
   }, [evtData, calcStats]);
+
+  const importedEmailMap = useMemo(() => getStoredEmailMap(evtInfo?.condicoes), [evtInfo]);
+  const conferenceRows = useMemo(() => {
+    if (!evtData) return [];
+    return buildConferenceRows({
+      divulgadoras: evtData.divulgadoras,
+      acoes: evtData.acoes,
+      marcacoes: evtData.marcacoes,
+      metas: evtData.metas,
+      emailMap: importedEmailMap,
+    });
+  }, [evtData, importedEmailMap]);
+  const eventDateLabel = useMemo(() => {
+    if (!evtInfo?.data_evento) return "Data não informada";
+    return new Date(`${evtInfo.data_evento}T00:00:00`).toLocaleDateString("pt-BR");
+  }, [evtInfo]);
 
   // ── EVENTO CRUD ───────────────────────────────────────────────
   const criarEvento = useCallback(async ()=>{
@@ -391,7 +494,7 @@ export default function App() {
     let acaoCriada = null;
     try {
       // 1. Cria a ação
-      const acao = await criarAcao({evento_id:activeEventoId,numero:num,nome,total_participantes:parsed.length});
+      const acao = await criarAcao({evento_id:activeEventoId,numero:num,nome,total_participantes:0});
       acaoCriada = acao;
       const mergeMap={};
       for (const md of (mergeDecisions||[])) if(md.action==="merge") mergeMap[normStr(md.newEntry.nome)]=md.existingId;
@@ -411,7 +514,6 @@ export default function App() {
           div = await criarDivulgadora({evento_id:activeEventoId,nome:p.nome,instagram:p.instagram||"",entrada_acao:num});
           novasDivs.push(div);
           allDivs.push(div);
-          // X retroativo nas ações anteriores
           for (const a of evtData.acoes) {
             marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:div.id,acao_id:a.id,valor:"X"});
           }
@@ -423,15 +525,16 @@ export default function App() {
       // X para quem não participou
       const todasDivs=[...evtData.divulgadoras,...novasDivs];
       for (const d of todasDivs) {
-        if (!participantIds.has(d.id)) {
+        if (getEntradaAcao(d) <= num && !participantIds.has(d.id)) {
           marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:d.id,acao_id:acao.id,valor:"X"});
         }
       }
       await upsertMarcacoesBatch(marcacoesNovas);
-      await audit("create",`Ação ${num} importada`,"Ações",`${parsed.length} participantes, ${novasDivs.length} novas`);
+      await atualizarAcao(acao.id,{total_participantes:participantIds.size});
+      await audit("create",`Ação ${num} importada`,"Ações",`${participantIds.size} participantes únicos, ${novasDivs.length} novas`);
       await recarregarEvento();
       setAcaoTexto(""); setAcaoNum(""); setAcaoNome(""); setDupReview(null);
-      showToast(`✅ Ação ${num} registrada! ${novasDivs.length} novas${skippedDuplicates?` · ${skippedDuplicates} repetidas ignoradas`:""}`);
+      showToast(`✅ Ação ${num} registrada! ${participantIds.size} participantes${novasDivs.length?` · ${novasDivs.length} novas`:""}${skippedDuplicates?` · ${skippedDuplicates} repetidas ignoradas`:""}`);
     } catch(e){
       if (acaoCriada?.id) {
         try { await deletarAcao(acaoCriada.id); } catch {}
@@ -473,20 +576,30 @@ export default function App() {
         const pNorm=normStr(p.nome),ni=normInsta(p.instagram); let div=null;
         if(ni) div=allDivs.find(d=>normInsta(d.instagram)===ni);
         if(!div) div=allDivs.find(d=>normStr(d.nome)===pNorm);
-        if(!div) { div=await criarDivulgadora({evento_id:activeEventoId,nome:p.nome,instagram:p.instagram||"",entrada_acao:acaoNumero}); allDivs.push(div); }
+        if(!div) {
+          div=await criarDivulgadora({evento_id:activeEventoId,nome:p.nome,instagram:p.instagram||"",entrada_acao:acaoNumero});
+          allDivs.push(div);
+          for (const a of evtData.acoes) {
+            if (getAcaoNumero(a) < Number(acaoNumero)) {
+              marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:div.id,acao_id:a.id,valor:"X"});
+            }
+          }
+        }
         if (participantIds.has(div.id)) { skippedDuplicates++; continue; }
         participantIds.add(div.id);
         marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:div.id,acao_id:acaoId,valor:"OK"});
       }
       for (const d of evtData.divulgadoras) {
-        if (!participantIds.has(d.id)) marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:d.id,acao_id:acaoId,valor:"X"});
+        if (getEntradaAcao(d) <= Number(acaoNumero) && !participantIds.has(d.id)) {
+          marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:d.id,acao_id:acaoId,valor:"X"});
+        }
       }
       await upsertMarcacoesBatch(marcacoesNovas);
-      await atualizarAcao(acaoId,{total_participantes:validos.length});
-      await audit("edit",`Ação ${acaoNumero} editada`,"Ações",`${validos.length} participantes`);
+      await atualizarAcao(acaoId,{total_participantes:participantIds.size});
+      await audit("edit",`Ação ${acaoNumero} editada`,"Ações",`${participantIds.size} participantes únicos`);
       await recarregarEvento();
       setEditAcaoPreview(null);
-      showToast(`✅ Ação ${acaoNumero} atualizada!${skippedDuplicates?` · ${skippedDuplicates} repetidas ignoradas`:""}`);
+      showToast(`✅ Ação ${acaoNumero} atualizada! ${participantIds.size} participantes${skippedDuplicates?` · ${skippedDuplicates} repetidas ignoradas`:""}`);
     } catch(e){ console.error("Erro ao reprocessar ação", e); showToast(`Erro ao reprocessar: ${e?.message || "falha no Supabase"}`,"del"); }
   }, [editAcaoPreview, evtData, activeEventoId, audit, recarregarEvento, showToast]);
 
@@ -572,6 +685,78 @@ export default function App() {
     showToast("✅ Condições salvas","edit");
   }, [activeEventoId, evtInfo, condCat, condTexto, audit, showToast]);
 
+  const processarImportacaoEmails = useCallback(() => {
+    if (!evtData?.divulgadoras?.length) {
+      showToast("Carregue um evento antes de importar emails","del");
+      return;
+    }
+    if (!emailImportText.trim()) {
+      showToast("Cole ou carregue a lista de emails","del");
+      return;
+    }
+    const preview = buildEmailImportPreview(emailImportText, evtData.divulgadoras);
+    if (!preview.parsed.length) {
+      showToast("Nenhum email válido encontrado","del");
+      return;
+    }
+    setEmailImportPreview(preview);
+  }, [emailImportText, evtData, showToast]);
+
+  const salvarImportacaoEmails = useCallback(async () => {
+    if (!emailImportPreview) return;
+    const novasCondicoes = {
+      ...(evtInfo?.condicoes || {}),
+      emails: {
+        ...(evtInfo?.condicoes?.emails || {}),
+        ...emailImportPreview.emailMap,
+      },
+    };
+    await salvarCondicoes(activeEventoId, novasCondicoes);
+    await audit("edit","Importação de emails atualizada","Conferência Final",`${Object.keys(emailImportPreview.emailMap).length} emails vinculados`);
+    setEvtInfo((prev) => ({ ...prev, condicoes: novasCondicoes }));
+    setEmailImportPreview(null);
+    setEmailImportText("");
+    showToast("✅ Emails importados e salvos","edit");
+  }, [activeEventoId, audit, emailImportPreview, evtInfo, showToast]);
+
+  const lerArquivoEmails = useCallback((e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setEmailImportText(String(ev.target?.result || ""));
+      showToast("✅ Lista de emails carregada!");
+    };
+    reader.readAsText(file, "UTF-8");
+    e.target.value = "";
+  }, [showToast]);
+
+  const gerarConferenciaFinal = useCallback(async () => {
+    if (!evtData || !evtInfo) return;
+    try {
+      setGeneratingConference(true);
+      const blob = await generateConferenceWorkbook({
+        templateUrl: "/modelo-planilha-vslt.xlsx",
+        eventName: evtInfo.nome,
+        eventDate: eventDateLabel,
+        divulgadoras: evtData.divulgadoras,
+        acoes: [...evtData.acoes].sort((a, b) => Number(a.numero || 0) - Number(b.numero || 0)),
+        marcacoes: evtData.marcacoes,
+        metas: evtData.metas,
+        emailMap: importedEmailMap,
+      });
+      const filename = `conferencia_final_${evtInfo.nome.replace(/\s+/g, "_")}.xlsx`;
+      downloadBlob(blob, filename);
+      await audit("export","Conferência final exportada","Conferência Final",filename);
+      showToast("📄 Planilha final gerada!");
+    } catch (error) {
+      console.error("Erro ao gerar conferência final", error);
+      showToast(`Erro ao gerar planilha: ${error?.message || "falha no Excel"}`, "del");
+    } finally {
+      setGeneratingConference(false);
+    }
+  }, [audit, eventDateLabel, evtData, evtInfo, importedEmailMap, showToast]);
+
   // ── SORTEIO ───────────────────────────────────────────────────
   useEffect(()=>{
     if (!sortEventoId) return;
@@ -632,21 +817,24 @@ export default function App() {
   const generateReport = useCallback((divulgadoras,acoes,marcacoes,metas)=>{
     const s=calcStats(divulgadoras,acoes,marcacoes);
     return (metas||[]).sort((a,b)=>b.percentual-a.percentual).map(meta=>({
-      meta, qualified:s.ranking.filter(r=>r.pct>=meta.percentual), notQualified:s.ranking.filter(r=>r.pct<meta.percentual)
+      meta,
+      qualified:s.ranking.filter(r=>r.total>0&&r.pct>=meta.percentual),
+      notQualified:s.ranking.filter(r=>r.total>0&&r.pct<meta.percentual)
     }));
   }, [calcStats]);
 
   const exportCSV = useCallback(async(tipo="parcial")=>{
     if (!evtData||!evtInfo) return;
     const {divulgadoras,acoes,marcacoes,metas,promoters,sorteios}=evtData;
+    const statsReport=calcStats(divulgadoras,acoes,marcacoes);
     const report=generateReport(divulgadoras,acoes,marcacoes,metas);
     let csv="\uFEFF";
-    csv+=`RELATÓRIO ${tipo.toUpperCase()} — ${evtInfo.nome}\nGerado em: ${new Date().toLocaleDateString("pt-BR")}\nTotal Ações: ${acoes.length}\nTotal Divulgadoras: ${divulgadoras.length}\n\n`;
+    csv+=`RELATÓRIO ${tipo.toUpperCase()} — ${evtInfo.nome}\nGerado em: ${new Date().toLocaleDateString("pt-BR")}\nAções válidas no cálculo: ${statsReport.usedActionCount}/${acoes.length}\nTotal Divulgadoras: ${divulgadoras.length}\n\n`;
     for (const r of report) {
       csv+=`META: ${r.meta.label} (>= ${r.meta.percentual}%)\nClassificadas: ${r.qualified.length}\nNome;Instagram;OKs;Total;%;Entrou\n`;
-      for (const q of r.qualified) csv+=`${q.nome};${q.instagram?"@"+q.instagram:""};${q.ok};${acoes.length};${q.pct.toFixed(1)}%;Ação ${q.entrada_acao||"?"}\n`;
+      for (const q of r.qualified) csv+=`${q.nome};${q.instagram?"@"+q.instagram:""};${q.ok};${q.total};${q.pct.toFixed(1)}%;Ação ${q.entrada_acao||"?"}\n`;
       csv+=`\nNão classificadas:\n`;
-      for (const q of r.notQualified) csv+=`${q.nome};${q.instagram?"@"+q.instagram:""};${q.ok};${acoes.length};${q.pct.toFixed(1)}%;Ação ${q.entrada_acao||"?"}\n`;
+      for (const q of r.notQualified) csv+=`${q.nome};${q.instagram?"@"+q.instagram:""};${q.ok};${q.total};${q.pct.toFixed(1)}%;Ação ${q.entrada_acao||"?"}\n`;
       csv+="\n";
     }
     if (sorteios.length) {
@@ -666,7 +854,7 @@ export default function App() {
     const a=document.createElement("a"); a.href=url; a.download=`relatorio_${tipo}_${evtInfo.nome.replace(/\s/g,"_")}.csv`; a.click(); URL.revokeObjectURL(url);
     await audit("export",`Relatório ${tipo} exportado`,"Relatórios",evtInfo.nome);
     showToast(`📊 Relatório ${tipo} exportado!`);
-  }, [evtData, evtInfo, generateReport, audit, showToast]);
+  }, [evtData, evtInfo, generateReport, calcStats, audit, showToast]);
 
   // ── AUDITORIA ─────────────────────────────────────────────────
   const filteredAudit = useMemo(()=>
@@ -877,7 +1065,7 @@ export default function App() {
             {evtTab==="dashboard"&&(
               <div>
                 <div className="sg">
-                  {[{n:evtData.divulgadoras.length,l:"Divulgadoras",c:"#a78bfa",ic:"👩‍💼"},{n:evtData.acoes.length,l:"Ações",c:"#34d399",ic:"⚡"},{n:stats?.topCount||0,l:"100% Presença",c:"#fbbf24",ic:"🏆"},{n:`${stats?.avg.toFixed(0)||0}%`,l:"Média Geral",c:"#f87171",ic:"📊"}].map((s,i)=>(
+                  {[{n:evtData.divulgadoras.length,l:"Divulgadoras",c:"#a78bfa",ic:"👩‍💼"},{n:`${stats?.usedActionCount||0}/${evtData.acoes.length}`,l:"Ações Válidas",c:"#34d399",ic:"⚡"},{n:stats?.topCount||0,l:"100% Presença",c:"#fbbf24",ic:"🏆"},{n:`${stats?.avg.toFixed(0)||0}%`,l:"Média Geral",c:"#f87171",ic:"📊"}].map((s,i)=>(
                     <div key={i} className="sc" style={{borderTop:`3px solid ${s.c}`}}><span className="sc-ic">{s.ic}</span><div className="sc-n" style={{color:s.c}}>{s.n}</div><div className="sc-l">{s.l}</div></div>
                   ))}
                 </div>
@@ -897,7 +1085,7 @@ export default function App() {
                       <div className="ct">📈 OKs por Ação</div>
                       {stats.acaoStats.map(a=>(
                         <div key={a.id} style={{marginBottom:11}}>
-                          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}><span>Ação {a.numero}</span><span style={{color:"#64748b"}}>{a.ok}/{a.total}</span></div>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}><span>Ação {a.numero}{!a.reliable&&<span style={{color:"#f87171",marginLeft:6,fontSize:11}}>(fora do cálculo)</span>}</span><span style={{color:"#64748b"}}>{a.ok}/{a.total||a.eligible}</span></div>
                           <div className="prog"><div className="pf" style={{width:`${a.total?(a.ok/a.total)*100:0}%`}}/></div>
                         </div>
                       ))}
@@ -1069,7 +1257,7 @@ export default function App() {
                             <span style={{fontSize:13}}>{a.nome}</span>
                           </div>
                           <div style={{display:"flex",alignItems:"center",gap:8}}>
-                            <span style={{fontSize:12,color:"#64748b"}}>{s?.ok||0}/{s?.total||0}</span>
+                            <span style={{fontSize:12,color:"#64748b"}}>{s?.ok||0}/{s?.total||s?.eligible||0}</span>
                             <button className="btn be bsm" onClick={()=>limparAcao(a.id)}>✏️</button>
                             {!evtInfo.encerrado&&<button className="btn bd bsm" onClick={()=>doRemoverAcao(a.id)}>✕</button>}
                           </div>
@@ -1134,27 +1322,193 @@ export default function App() {
             {/* TABELA */}
             {evtTab==="tabela"&&(
               !stats||!evtData.acoes.length?<div className="empty"><div style={{fontSize:48}}>📋</div></div>:(
-                <div className="tbl-wrap">
-                  <table className="tbl" style={{minWidth:700}}>
-                    <thead><tr>
-                      <th style={{position:"sticky",left:0,background:"#12121f",minWidth:150}}>Nome</th>
-                      <th>Instagram</th><th>Entrada</th>
-                      {evtData.acoes.map(a=><th key={a.id} style={{textAlign:"center",minWidth:44}}>A{a.numero}</th>)}
-                      <th style={{textAlign:"center"}}>OK</th><th style={{textAlign:"center"}}>%</th>
-                    </tr></thead>
-                    <tbody>
-                      {stats.ranking.map(r=>(
-                        <tr key={r.id}>
-                          <td style={{fontWeight:600,position:"sticky",left:0,background:"#07070d"}}>{r.nome}</td>
-                          <td style={{color:"#a78bfa",fontSize:12}}>{r.instagram?`@${r.instagram}`:""}</td>
-                          <td style={{fontSize:11,color:"#64748b"}}>Ação {r.entrada_acao||"?"}</td>
-                          {evtData.acoes.map(a=>{const v=evtData.marcacoes[`${r.id}_${a.id}`]; return<td key={a.id} className={v==="OK"?"cell-ok":"cell-x"}>{v||"—"}</td>;})}
-                          <td style={{textAlign:"center",fontWeight:700,color:"#34d399"}}>{r.ok}</td>
-                          <td style={{textAlign:"center",fontWeight:700,color:r.pct===100?"#34d399":r.pct>=75?"#fbbf24":"#f87171"}}>{r.pct.toFixed(0)}%</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:18,flexWrap:"wrap"}}>
+                    <div>
+                      <div style={{fontSize:19,fontWeight:800}}>📋 Tabela e Conferência Final</div>
+                      <div style={{fontSize:12,color:"#64748b",marginTop:4}}>
+                        Visualize a linha cronológica das ações, vincule emails e gere a relação final no Excel.
+                      </div>
+                      <div style={{fontSize:13,color:"#e2e8f0",marginTop:8,fontWeight:700}}>
+                        {evtInfo?.nome} • {eventDateLabel}
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                      <span className="badge bpu">{conferenceRows.length} divulgadoras</span>
+                      <span className="badge bgr">{evtData.acoes.length} ações</span>
+                      <span className="badge bbl">{Object.keys(importedEmailMap||{}).length} emails salvos</span>
+                    </div>
+                  </div>
+
+                  <div className="g2" style={{marginBottom:18,alignItems:"stretch"}}>
+                    <div className="card">
+                      <div className="ct">✉️ Importar Emails</div>
+                      <div style={{fontSize:12,color:"#64748b",marginBottom:12}}>
+                        Cole a lista ou envie um arquivo `.txt` / `.csv`. O sistema cruza por Instagram e nome para preencher a conferência final.
+                      </div>
+                      <textarea
+                        style={{...inp,minHeight:170,resize:"vertical",lineHeight:1.5}}
+                        value={emailImportText}
+                        onChange={e=>setEmailImportText(e.target.value)}
+                        placeholder={"Ex:\n@ana; ana@email.com\nAna Souza; ana@email.com\nAna Souza / @anasouza / ana@email.com"}
+                      />
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}>
+                        <label className="btn bg bsm" style={{cursor:"pointer"}}>
+                          📂 Carregar arquivo
+                          <input type="file" accept=".txt,.csv,.tsv" onChange={lerArquivoEmails} style={{display:"none"}} />
+                        </label>
+                        <button className="btn bp bsm" onClick={processarImportacaoEmails}>Validar cruzamento</button>
+                        <button className="btn bd bsm" onClick={()=>{setEmailImportText("");setEmailImportPreview(null);}}>Limpar</button>
+                      </div>
+                    </div>
+
+                    <div className="card">
+                      <div className="ct">📄 Gerar Relação Final</div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginBottom:14}}>
+                        <div style={{background:"rgba(52,211,153,.08)",border:"1px solid rgba(52,211,153,.18)",borderRadius:12,padding:"12px 14px"}}>
+                          <div style={{fontSize:22,fontWeight:800,color:"#34d399"}}>{conferenceRows.length}</div>
+                          <div style={{fontSize:11,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1}}>Linhas</div>
+                        </div>
+                        <div style={{background:"rgba(167,139,250,.08)",border:"1px solid rgba(167,139,250,.18)",borderRadius:12,padding:"12px 14px"}}>
+                          <div style={{fontSize:22,fontWeight:800,color:"#a78bfa"}}>{evtData.acoes.length}</div>
+                          <div style={{fontSize:11,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1}}>Ações</div>
+                        </div>
+                        <div style={{background:"rgba(251,191,36,.08)",border:"1px solid rgba(251,191,36,.18)",borderRadius:12,padding:"12px 14px"}}>
+                          <div style={{fontSize:22,fontWeight:800,color:"#fbbf24"}}>{conferenceRows.filter(r=>r.email).length}</div>
+                          <div style={{fontSize:11,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1}}>Com email</div>
+                        </div>
+                      </div>
+                      <div style={{fontSize:12,color:"#64748b",marginBottom:14}}>
+                        A planilha sai no template enviado, com `OK` e `X` em ordem cronológica, destaque visual nas ações, cabeçalho com evento/data, `%`, email, meta de drinks e resultado final da meta.
+                      </div>
+                      <button className="btn bp" style={{width:"100%",justifyContent:"center"}} onClick={gerarConferenciaFinal} disabled={generatingConference||!conferenceRows.length}>
+                        {generatingConference?"Gerando Excel...":"⬇ Gerar conferência final em Excel"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {emailImportPreview&&(
+                    <div className="card" style={{marginBottom:18}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:14}}>
+                        <div>
+                          <div className="ct" style={{marginBottom:4}}>🔎 Resultado do Cruzamento</div>
+                          <div style={{fontSize:12,color:"#64748b"}}>
+                            Revise antes de salvar os emails no evento.
+                          </div>
+                        </div>
+                        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                          <span className="badge bgr">{emailImportPreview.matched.length} vinculados</span>
+                          <span className="badge br">{emailImportPreview.unmatched.length} não encontrados</span>
+                          {!!emailImportPreview.duplicateTargets.length&&<span className="badge by">{emailImportPreview.duplicateTargets.length} conflitos</span>}
+                        </div>
+                      </div>
+
+                      <div className="g2" style={{alignItems:"start"}}>
+                        <div>
+                          <div style={{fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,color:"#34d399",marginBottom:8}}>Vinculados</div>
+                          <div className="tbl-wrap" style={{maxHeight:280}}>
+                            <table className="tbl" style={{minWidth:520}}>
+                              <thead><tr><th>Divulgadora</th><th>Instagram</th><th>Email</th></tr></thead>
+                              <tbody>
+                                {emailImportPreview.matched.slice(0,40).map((item,idx)=>(
+                                  <tr key={`${item.divulgadoraId}_${idx}`}>
+                                    <td>{item.divulgadoraNome}</td>
+                                    <td style={{color:"#a78bfa"}}>{item.divulgadoraInstagram?`@${item.divulgadoraInstagram}`:"—"}</td>
+                                    <td>{item.email}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:1,color:"#f87171",marginBottom:8}}>Não encontrados</div>
+                          <div style={{background:"rgba(248,113,113,.06)",border:"1px solid rgba(248,113,113,.14)",borderRadius:12,padding:"12px 14px",minHeight:280}}>
+                            {!emailImportPreview.unmatched.length?
+                              <div style={{color:"#34d399",fontSize:13}}>Todos os emails encontrados com sucesso.</div>:
+                              emailImportPreview.unmatched.slice(0,30).map((item,idx)=>(
+                                <div key={`${item.email}_${idx}`} style={{padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,.05)",fontSize:13}}>
+                                  <div style={{fontWeight:700}}>{item.nome||item.instagram||"Sem identificação"}</div>
+                                  <div style={{color:"#a78bfa"}}>{item.instagram?`@${item.instagram}`:"—"}</div>
+                                  <div style={{color:"#94a3b8"}}>{item.email}</div>
+                                </div>
+                              ))
+                            }
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:14}}>
+                        <button className="btn bp bsm" onClick={salvarImportacaoEmails} disabled={!emailImportPreview.matched.length}>Salvar emails no evento</button>
+                        <button className="btn bg bsm" onClick={()=>setEmailImportPreview(null)}>Fechar conferência</button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="card" style={{marginBottom:18}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:14}}>
+                      <div>
+                        <div className="ct" style={{marginBottom:4}}>👀 Prévia da Relação Final</div>
+                        <div style={{fontSize:12,color:"#64748b"}}>
+                          Essa é a base que vai para o Excel: cronologia das ações, email e meta de drinks.
+                        </div>
+                        <div style={{fontSize:13,color:"#e2e8f0",marginTop:8,fontWeight:700}}>
+                          {evtInfo?.nome} • {eventDateLabel}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="tbl-wrap">
+                      <table className="tbl" style={{minWidth:1080}}>
+                        <thead><tr>
+                          <th>Nome</th>
+                          <th>Instagram</th>
+                          <th>Email</th>
+                          <th style={{textAlign:"center"}}>TOTAL</th>
+                          <th>Meta Drinks</th>
+                          {evtData.acoes.map(a=><th key={a.id} style={{textAlign:"center",minWidth:44}}>A{a.numero}</th>)}
+                          <th style={{textAlign:"center"}}>%</th>
+                          <th>Bateu meta final</th>
+                        </tr></thead>
+                        <tbody>
+                          {conferenceRows.slice(0,25).map(r=>(
+                            <tr key={`preview_${r.id}`}>
+                              <td style={{fontWeight:600}}>{r.nome}</td>
+                              <td style={{color:"#a78bfa",fontSize:12}}>{r.instagram?`@${r.instagram}`:""}</td>
+                              <td style={{fontSize:12}}>{r.email||"—"}</td>
+                              <td style={{textAlign:"center",fontWeight:700,color:"#34d399"}}>{r.ok}</td>
+                              <td style={{fontWeight:700,color:r.drinksMeta!=="NAO"?"#fbbf24":"#64748b"}}>{r.drinksMeta}</td>
+                              {r.actionValues.map((v,idx)=><td key={`${r.id}_${idx}`} style={conferenceCellStyle(v)}>{v||"—"}</td>)}
+                              <td style={{textAlign:"center",fontWeight:800,color:r.pct>=85?"#34d399":r.pct>=70?"#fbbf24":"#f87171"}}>{r.pct.toFixed(2)}%</td>
+                              <td style={{fontWeight:800,color:r.finalMetaHit==="SIM"?"#34d399":"#f87171"}}>{r.finalMetaHit}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="tbl-wrap">
+                    <table className="tbl" style={{minWidth:700}}>
+                      <thead><tr>
+                        <th style={{position:"sticky",left:0,background:"#12121f",minWidth:150}}>Nome</th>
+                        <th>Instagram</th><th>Entrada</th>
+                        {evtData.acoes.map(a=><th key={a.id} style={{textAlign:"center",minWidth:44}}>A{a.numero}</th>)}
+                        <th style={{textAlign:"center"}}>OK</th><th style={{textAlign:"center"}}>%</th>
+                      </tr></thead>
+                      <tbody>
+                        {stats.ranking.map(r=>(
+                          <tr key={r.id}>
+                            <td style={{fontWeight:600,position:"sticky",left:0,background:"#07070d"}}>{r.nome}</td>
+                            <td style={{color:"#a78bfa",fontSize:12}}>{r.instagram?`@${r.instagram}`:""}</td>
+                            <td style={{fontSize:11,color:"#64748b"}}>Ação {r.entrada_acao||"?"}</td>
+                            {evtData.acoes.map(a=>{const v=evtData.marcacoes[`${r.id}_${a.id}`]; return<td key={a.id} style={conferenceCellStyle(v)}>{v||"—"}</td>;})}
+                            <td style={{textAlign:"center",fontWeight:700,color:"#34d399"}}>{r.ok}</td>
+                            <td style={{textAlign:"center",fontWeight:700,color:r.pct===100?"#34d399":r.pct>=75?"#fbbf24":"#f87171"}}>{r.pct.toFixed(0)}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )
             )}
@@ -1268,7 +1622,7 @@ export default function App() {
                         {r.qualified.map(q=>(
                           <div key={q.id} style={{display:"flex",justifyContent:"space-between",padding:"6px 8px",fontSize:13,borderBottom:"1px solid rgba(255,255,255,.04)"}}>
                             <div><strong>{q.nome}</strong>{q.instagram&&<span style={{color:"#a78bfa",marginLeft:6}}>@{q.instagram}</span>}</div>
-                            <div style={{display:"flex",gap:10}}><span style={{color:"#64748b"}}>{q.ok}/{evtData.acoes.length}</span><span style={{fontWeight:700,color:"#34d399"}}>{q.pct.toFixed(0)}%</span></div>
+                            <div style={{display:"flex",gap:10}}><span style={{color:"#64748b"}}>{q.ok}/{q.total}</span><span style={{fontWeight:700,color:"#34d399"}}>{q.pct.toFixed(0)}%</span></div>
                           </div>
                         ))}
                         {r.notQualified.length>0&&(
@@ -1505,7 +1859,7 @@ export default function App() {
       </Modal>
 
       <Modal open={showEncerrar} onClose={()=>setShowEncerrar(false)} title="🔒 Encerrar Evento">
-        <div style={{fontSize:13,color:"#64748b",marginBottom:16,lineHeight:1.7}}>O percentual será calculado sobre as <strong style={{color:"#fbbf24"}}>{evtData?.acoes.length} ações totais</strong>. Quem entrou tarde terá X retroativos.</div>
+          <div style={{fontSize:13,color:"#64748b",marginBottom:16,lineHeight:1.7}}>O percentual será calculado sobre as <strong style={{color:"#fbbf24"}}>{stats?.usedActionCount||0} ações válidas</strong>. Quem entrou depois recebe falta nas ações anteriores.</div>
         <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
           <button className="btn bg" onClick={()=>setShowEncerrar(false)}>Cancelar</button>
           <button className="btn bd" onClick={doEncerrar}>Confirmar</button>
