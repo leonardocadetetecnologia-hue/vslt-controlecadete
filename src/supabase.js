@@ -4,6 +4,7 @@
 // ══════════════════════════════════════════════════════════════
 
 import { createClient } from "@supabase/supabase-js";
+import bcrypt from "bcryptjs";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY;
@@ -13,20 +14,75 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const SELECT_PAGE_SIZE = 1000;
+
+async function fetchAllRows(buildQuery, pageSize = SELECT_PAGE_SIZE) {
+  const rows = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await buildQuery().range(from, from + pageSize - 1);
+    if (error) throw error;
+
+    const chunk = data || [];
+    rows.push(...chunk);
+    if (chunk.length < pageSize) break;
+
+    from += pageSize;
+  }
+
+  return rows;
+}
+
+function bufferToHex(buffer) {
+  return Array.from(new Uint8Array(buffer))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function bufferToBase64(buffer) {
+  let binary = "";
+  for (const byte of new Uint8Array(buffer)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function sha256Variants(value) {
+  if (!globalThis.crypto?.subtle) return [];
+  const encoded = new TextEncoder().encode(value);
+  const hash = await crypto.subtle.digest("SHA-256", encoded);
+  const hex = bufferToHex(hash);
+  const base64 = bufferToBase64(hash);
+  return [hex, hex.toUpperCase(), base64];
+}
+
+async function senhaConfere(password, storedHash) {
+  if (!storedHash) return false;
+  if (password === storedHash) return true;
+
+  if (storedHash.startsWith("$2a$") || storedHash.startsWith("$2b$") || storedHash.startsWith("$2y$")) {
+    return bcrypt.compare(password, storedHash);
+  }
+
+  const shaCandidates = await sha256Variants(password);
+  return shaCandidates.includes(storedHash);
+}
 
 // ══════════════════════════════════════════════════════════════
 // AUTENTICAÇÃO (simples, sem Supabase Auth)
 // ══════════════════════════════════════════════════════════════
 
 export async function loginUsuario(username, password) {
+  const normalizedUsername = username.toLowerCase().trim();
   const { data, error } = await supabase
     .from("usuarios")
     .select("*")
-    .eq("username", username.toLowerCase().trim())
-    .eq("password_hash", password)
+    .eq("username", normalizedUsername)
     .eq("ativo", true)
-    .single();
+    .maybeSingle();
   if (error || !data) return { user: null, error: "Credenciais inválidas" };
+  const ok = await senhaConfere(password, data.password_hash);
+  if (!ok) return { user: null, error: "Credenciais invalidas" };
+
   return { user: data, error: null };
 }
 
@@ -43,11 +99,12 @@ export async function listarUsuarios() {
 // ══════════════════════════════════════════════════════════════
 
 export async function listarEventos() {
-  const { data, error } = await supabase
-    .from("vw_eventos_resumo")
-    .select("*")
-    .order("criado_em", { ascending: false });
-  return data || [];
+  return fetchAllRows(() =>
+    supabase
+      .from("vw_eventos_resumo")
+      .select("*")
+      .order("criado_em", { ascending: false })
+  );
 }
 
 export async function criarEvento({ nome, data_evento, criado_por }) {
@@ -131,12 +188,13 @@ export async function salvarMetas(evento_id, metas) {
 // ══════════════════════════════════════════════════════════════
 
 export async function listarAcoes(evento_id) {
-  const { data } = await supabase
-    .from("acoes")
-    .select("*")
-    .eq("evento_id", evento_id)
-    .order("numero", { ascending: true });
-  return data || [];
+  return fetchAllRows(() =>
+    supabase
+      .from("acoes")
+      .select("*")
+      .eq("evento_id", evento_id)
+      .order("numero", { ascending: true })
+  );
 }
 
 export async function criarAcao({ evento_id, numero, nome, total_participantes }) {
@@ -170,12 +228,13 @@ export async function deletarAcao(id) {
 // ══════════════════════════════════════════════════════════════
 
 export async function listarDivulgadoras(evento_id) {
-  const { data } = await supabase
-    .from("divulgadoras")
-    .select("*")
-    .eq("evento_id", evento_id)
-    .order("criado_em", { ascending: true });
-  return data || [];
+  return fetchAllRows(() =>
+    supabase
+      .from("divulgadoras")
+      .select("*")
+      .eq("evento_id", evento_id)
+      .order("criado_em", { ascending: true })
+  );
 }
 
 export async function criarDivulgadora({ evento_id, nome, instagram, entrada_acao }) {
@@ -209,13 +268,17 @@ export async function deletarDivulgadora(id) {
 // ══════════════════════════════════════════════════════════════
 
 export async function listarMarcacoes(evento_id) {
-  const { data } = await supabase
-    .from("marcacoes")
-    .select("divulgadora_id, acao_id, valor")
-    .eq("evento_id", evento_id);
+  const data = await fetchAllRows(() =>
+    supabase
+      .from("marcacoes")
+      .select("divulgadora_id, acao_id, valor")
+      .eq("evento_id", evento_id)
+      .order("divulgadora_id", { ascending: true })
+      .order("acao_id", { ascending: true })
+  );
   // Retorna no formato { "divId_acaoId": "OK" | "X" } igual ao sistema atual
   const map = {};
-  for (const m of data || []) {
+  for (const m of data) {
     map[`${m.divulgadora_id}_${m.acao_id}`] = m.valor;
   }
   return map;
@@ -255,12 +318,13 @@ export async function deletarMarcacoesDaDivulgadora(divulgadora_id) {
 // ══════════════════════════════════════════════════════════════
 
 export async function listarPromoters(evento_id) {
-  const { data } = await supabase
-    .from("promoters")
-    .select("*, vendas(*)")
-    .eq("evento_id", evento_id)
-    .order("criado_em", { ascending: true });
-  return data || [];
+  return fetchAllRows(() =>
+    supabase
+      .from("promoters")
+      .select("*, vendas(*)")
+      .eq("evento_id", evento_id)
+      .order("criado_em", { ascending: true })
+  );
 }
 
 export async function criarPromoter({ evento_id, nome, email, link, categoria }) {
@@ -324,20 +388,22 @@ export async function deletarVenda(id) {
 // ══════════════════════════════════════════════════════════════
 
 export async function listarSorteios(evento_id) {
-  const { data } = await supabase
-    .from("sorteios")
-    .select("*")
-    .eq("evento_id", evento_id)
-    .order("realizado_em", { ascending: false });
-  return data || [];
+  return fetchAllRows(() =>
+    supabase
+      .from("sorteios")
+      .select("*")
+      .eq("evento_id", evento_id)
+      .order("realizado_em", { ascending: false })
+  );
 }
 
 export async function listarTodosSorteios() {
-  const { data } = await supabase
-    .from("sorteios")
-    .select("*, eventos(nome)")
-    .order("realizado_em", { ascending: false });
-  return data || [];
+  return fetchAllRows(() =>
+    supabase
+      .from("sorteios")
+      .select("*, eventos(nome)")
+      .order("realizado_em", { ascending: false })
+  );
 }
 
 export async function criarSorteio({ evento_id, acao_id, acao_nome, titulo, premio, observacao, vencedoras }) {

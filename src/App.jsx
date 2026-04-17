@@ -388,29 +388,35 @@ export default function App() {
   }, [previewLista, previewAcaoNum, previewAcaoNome, evtData]);
 
   const confirmarAcao = useCallback(async(parsed,num,nome,mergeDecisions)=>{
+    let acaoCriada = null;
     try {
       // 1. Cria a ação
       const acao = await criarAcao({evento_id:activeEventoId,numero:num,nome,total_participantes:parsed.length});
+      acaoCriada = acao;
       const mergeMap={};
       for (const md of (mergeDecisions||[])) if(md.action==="merge") mergeMap[normStr(md.newEntry.nome)]=md.existingId;
 
       const marcacoesNovas=[];
       const novasDivs=[];
+      const allDivs=[...evtData.divulgadoras];
       let participantIds=new Set();
+      let skippedDuplicates=0;
 
       for (const p of parsed) {
         const pNorm=normStr(p.nome); let div=null;
-        if (mergeMap[pNorm]) div=evtData.divulgadoras.find(d=>d.id===mergeMap[pNorm]);
-        if (!div){ const ni=normInsta(p.instagram); if(ni) div=evtData.divulgadoras.find(d=>normInsta(d.instagram)===ni); }
-        if (!div) div=evtData.divulgadoras.find(d=>normStr(d.nome)===pNorm);
+        if (mergeMap[pNorm]) div=allDivs.find(d=>d.id===mergeMap[pNorm]);
+        if (!div){ const ni=normInsta(p.instagram); if(ni) div=allDivs.find(d=>normInsta(d.instagram)===ni); }
+        if (!div) div=allDivs.find(d=>normStr(d.nome)===pNorm);
         if (!div) {
           div = await criarDivulgadora({evento_id:activeEventoId,nome:p.nome,instagram:p.instagram||"",entrada_acao:num});
           novasDivs.push(div);
+          allDivs.push(div);
           // X retroativo nas ações anteriores
           for (const a of evtData.acoes) {
             marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:div.id,acao_id:a.id,valor:"X"});
           }
         }
+        if (participantIds.has(div.id)) { skippedDuplicates++; continue; }
         participantIds.add(div.id);
         marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:div.id,acao_id:acao.id,valor:"OK"});
       }
@@ -425,9 +431,13 @@ export default function App() {
       await audit("create",`Ação ${num} importada`,"Ações",`${parsed.length} participantes, ${novasDivs.length} novas`);
       await recarregarEvento();
       setAcaoTexto(""); setAcaoNum(""); setAcaoNome(""); setDupReview(null);
-      showToast(`✅ Ação ${num} registrada! ${novasDivs.length} novas`);
+      showToast(`✅ Ação ${num} registrada! ${novasDivs.length} novas${skippedDuplicates?` · ${skippedDuplicates} repetidas ignoradas`:""}`);
     } catch(e){
-      showToast("Erro ao importar ação","del");
+      if (acaoCriada?.id) {
+        try { await deletarAcao(acaoCriada.id); } catch {}
+      }
+      console.error("Erro ao importar ação", e);
+      showToast(`Erro ao importar ação: ${e?.message || "falha no Supabase"}`,"del");
     }
   }, [activeEventoId, evtData, audit, recarregarEvento, showToast]);
 
@@ -456,12 +466,15 @@ export default function App() {
     try {
       await deletarMarcacoesDaAcao(acaoId);
       const marcacoesNovas=[];
+      const allDivs=[...evtData.divulgadoras];
       const participantIds=new Set();
+      let skippedDuplicates=0;
       for (const p of validos) {
         const pNorm=normStr(p.nome),ni=normInsta(p.instagram); let div=null;
-        if(ni) div=evtData.divulgadoras.find(d=>normInsta(d.instagram)===ni);
-        if(!div) div=evtData.divulgadoras.find(d=>normStr(d.nome)===pNorm);
-        if(!div) { div=await criarDivulgadora({evento_id:activeEventoId,nome:p.nome,instagram:p.instagram||"",entrada_acao:acaoNumero}); }
+        if(ni) div=allDivs.find(d=>normInsta(d.instagram)===ni);
+        if(!div) div=allDivs.find(d=>normStr(d.nome)===pNorm);
+        if(!div) { div=await criarDivulgadora({evento_id:activeEventoId,nome:p.nome,instagram:p.instagram||"",entrada_acao:acaoNumero}); allDivs.push(div); }
+        if (participantIds.has(div.id)) { skippedDuplicates++; continue; }
         participantIds.add(div.id);
         marcacoesNovas.push({evento_id:activeEventoId,divulgadora_id:div.id,acao_id:acaoId,valor:"OK"});
       }
@@ -473,8 +486,8 @@ export default function App() {
       await audit("edit",`Ação ${acaoNumero} editada`,"Ações",`${validos.length} participantes`);
       await recarregarEvento();
       setEditAcaoPreview(null);
-      showToast(`✅ Ação ${acaoNumero} atualizada!`);
-    } catch(e){ showToast("Erro ao reprocessar","del"); }
+      showToast(`✅ Ação ${acaoNumero} atualizada!${skippedDuplicates?` · ${skippedDuplicates} repetidas ignoradas`:""}`);
+    } catch(e){ console.error("Erro ao reprocessar ação", e); showToast(`Erro ao reprocessar: ${e?.message || "falha no Supabase"}`,"del"); }
   }, [editAcaoPreview, evtData, activeEventoId, audit, recarregarEvento, showToast]);
 
   // ── DIVULGADORAS ──────────────────────────────────────────────
