@@ -382,6 +382,10 @@ export default function App() {
   }, [evtData, calcStats]);
 
   const importedEmailMap = useMemo(() => getStoredEmailMap(evtInfo?.condicoes), [evtInfo]);
+  const effectiveEmailMap = useMemo(() => ({
+    ...importedEmailMap,
+    ...(emailImportPreview?.emailMap || {}),
+  }), [emailImportPreview, importedEmailMap]);
   const conferenceRows = useMemo(() => {
     if (!evtData) return [];
     return buildConferenceRows({
@@ -389,12 +393,19 @@ export default function App() {
       acoes: evtData.acoes,
       marcacoes: evtData.marcacoes,
       metas: evtData.metas,
-      emailMap: importedEmailMap,
+      emailMap: effectiveEmailMap,
     });
-  }, [evtData, importedEmailMap]);
+  }, [evtData, effectiveEmailMap]);
   const eventDateLabel = useMemo(() => {
     if (!evtInfo?.data_evento) return "Data não informada";
-    return new Date(`${evtInfo.data_evento}T00:00:00`).toLocaleDateString("pt-BR");
+    const raw = String(evtInfo.data_evento).trim();
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(raw)) return raw;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      const [year, month, day] = raw.split("-");
+      return `${day}/${month}/${year}`;
+    }
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleDateString("pt-BR");
   }, [evtInfo]);
 
   // ── EVENTO CRUD ───────────────────────────────────────────────
@@ -702,14 +713,16 @@ export default function App() {
     setEmailImportPreview(preview);
   }, [emailImportText, evtData, showToast]);
 
-  const salvarImportacaoEmails = useCallback(async () => {
+  const salvarImportacaoEmails = useCallback(async (mode="merge") => {
     if (!emailImportPreview) return;
     const novasCondicoes = {
       ...(evtInfo?.condicoes || {}),
-      emails: {
-        ...(evtInfo?.condicoes?.emails || {}),
-        ...emailImportPreview.emailMap,
-      },
+      emails: mode === "replace"
+        ? { ...emailImportPreview.emailMap }
+        : {
+            ...(evtInfo?.condicoes?.emails || {}),
+            ...emailImportPreview.emailMap,
+          },
     };
     await salvarCondicoes(activeEventoId, novasCondicoes);
     await audit("edit","Importação de emails atualizada","Conferência Final",`${Object.keys(emailImportPreview.emailMap).length} emails vinculados`);
@@ -718,6 +731,18 @@ export default function App() {
     setEmailImportText("");
     showToast("✅ Emails importados e salvos","edit");
   }, [activeEventoId, audit, emailImportPreview, evtInfo, showToast]);
+
+  const limparEmailsSalvos = useCallback(async () => {
+    const novasCondicoes = {
+      ...(evtInfo?.condicoes || {}),
+      emails: {},
+    };
+    await salvarCondicoes(activeEventoId, novasCondicoes);
+    await audit("edit","Base de emails limpa","ConferÃªncia Final","Todos os emails validados foram removidos");
+    setEvtInfo((prev) => ({ ...prev, condicoes: novasCondicoes }));
+    setEmailImportPreview(null);
+    showToast("âœ… Emails validados apagados","edit");
+  }, [activeEventoId, audit, evtInfo, showToast]);
 
   const lerArquivoEmails = useCallback((e) => {
     const file = e.target.files?.[0];
@@ -743,7 +768,7 @@ export default function App() {
         acoes: [...evtData.acoes].sort((a, b) => Number(a.numero || 0) - Number(b.numero || 0)),
         marcacoes: evtData.marcacoes,
         metas: evtData.metas,
-        emailMap: importedEmailMap,
+        emailMap: effectiveEmailMap,
       });
       const filename = `conferencia_final_${evtInfo.nome.replace(/\s+/g, "_")}.xlsx`;
       downloadBlob(blob, filename);
@@ -755,7 +780,7 @@ export default function App() {
     } finally {
       setGeneratingConference(false);
     }
-  }, [audit, eventDateLabel, evtData, evtInfo, importedEmailMap, showToast]);
+  }, [audit, effectiveEmailMap, eventDateLabel, evtData, evtInfo, showToast]);
 
   // ── SORTEIO ───────────────────────────────────────────────────
   useEffect(()=>{
@@ -1336,7 +1361,7 @@ export default function App() {
                     <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                       <span className="badge bpu">{conferenceRows.length} divulgadoras</span>
                       <span className="badge bgr">{evtData.acoes.length} ações</span>
-                      <span className="badge bbl">{Object.keys(importedEmailMap||{}).length} emails salvos</span>
+                      <span className="badge bbl">{Object.keys(effectiveEmailMap||{}).length} emails ativos</span>
                     </div>
                   </div>
 
@@ -1358,6 +1383,7 @@ export default function App() {
                           <input type="file" accept=".txt,.csv,.tsv" onChange={lerArquivoEmails} style={{display:"none"}} />
                         </label>
                         <button className="btn bp bsm" onClick={processarImportacaoEmails}>Validar cruzamento</button>
+                        <button className="btn be bsm" onClick={limparEmailsSalvos} disabled={!Object.keys(importedEmailMap||{}).length}>Limpar salvos</button>
                         <button className="btn bd bsm" onClick={()=>{setEmailImportText("");setEmailImportPreview(null);}}>Limpar</button>
                       </div>
                     </div>
@@ -1439,7 +1465,9 @@ export default function App() {
                       </div>
 
                       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:14}}>
-                        <button className="btn bp bsm" onClick={salvarImportacaoEmails} disabled={!emailImportPreview.matched.length}>Salvar emails no evento</button>
+                        <button className="btn bp bsm" onClick={()=>salvarImportacaoEmails("merge")} disabled={!emailImportPreview.matched.length}>Somar aos salvos</button>
+                        <button className="btn be bsm" onClick={()=>salvarImportacaoEmails("replace")} disabled={!emailImportPreview.matched.length}>Substituir salvos</button>
+                        <button className="btn bd bsm" onClick={limparEmailsSalvos} disabled={!Object.keys(importedEmailMap||{}).length && !emailImportPreview.matched.length}>Limpar emails validados</button>
                         <button className="btn bg bsm" onClick={()=>setEmailImportPreview(null)}>Fechar conferência</button>
                       </div>
                     </div>

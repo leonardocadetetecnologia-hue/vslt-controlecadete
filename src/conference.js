@@ -15,6 +15,35 @@ export const normInsta = (s = "") =>
     .replace(/^@/, "")
     .replace(/\s/g, "");
 
+function levenshtein(a, b) {
+  const m = a.length;
+  const n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+function stringSimilarity(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  return 1 - levenshtein(a, b) / Math.max(a.length, b.length);
+}
+
+function nameTokens(name) {
+  return normStr(name)
+    .split(" ")
+    .filter(Boolean)
+    .filter((token) => token.length > 1);
+}
+
 const isMarkedStatus = (value) => value === "OK" || value === "X";
 
 export function getStoredEmailMap(condicoes) {
@@ -92,6 +121,23 @@ function scoreEmailMatch(entry, divulgadora) {
 
   if (entryName && divName && (entryName.includes(divName) || divName.includes(entryName)) && Math.max(entryName.length, divName.length) >= 8) {
     return 0.9;
+  }
+
+  const entryTokens = nameTokens(entry.nome);
+  const divTokens = nameTokens(divulgadora.nome);
+  if (entryTokens.length && divTokens.length) {
+    const entrySet = new Set(entryTokens);
+    const divSet = new Set(divTokens);
+    const shared = [...entrySet].filter((token) => divSet.has(token));
+    const overlap = shared.length / Math.max(entrySet.size, divSet.size);
+    const firstMatches = entryTokens[0] && entryTokens[0] === divTokens[0];
+    const lastMatches = entryTokens[entryTokens.length - 1] && entryTokens[entryTokens.length - 1] === divTokens[divTokens.length - 1];
+    const joinedScore = stringSimilarity(entryTokens.join(" "), divTokens.join(" "));
+
+    if (firstMatches && lastMatches && overlap >= 0.5) return Math.max(0.93, joinedScore);
+    if (firstMatches && overlap >= 0.6) return Math.max(0.91, joinedScore * 0.98);
+    if (shared.length >= 2 && overlap >= 0.75) return Math.max(0.9, joinedScore * 0.97);
+    if (joinedScore >= 0.9 && overlap >= 0.5) return joinedScore * 0.98;
   }
 
   return 0;
